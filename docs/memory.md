@@ -6,6 +6,7 @@
 Last updated: 2026-06-30 (session 2 — the "fresh-eyes" debugging pass).
 
 ## TL;DR status
+- ✅ **DONE (2026-06-30): verl GRPO ran 3/3 steps on ONE Gaudi HPU, `VERL_RC=0`, all metrics logged** (job 57954952, gaudi002). Success criterion #3 met. See Phase 8 in `03-debugging-journey.md`.
 - ✅ verl **installed and runs on Intel Gaudi 2** (driver SynapseAI 1.24) — Ray + custom `PlatformHPU`/`device.py`
   HPU backend + **FSDP model sharding on the Gaudi card** + optimizer + reward all run.
 - ✅ **The documented "lazy/eager catch-22" wall was a MISDIAGNOSIS and is now removed** (see below).

@@ -46,7 +46,7 @@ run_verl() {
 }
 
 RC=1
-ATT=/tmp/verl_attempt_${SLURM_JOB_ID}.log
+ATT=/tmp/verl_attempt_$$.log
 for attempt in 1 2 3 4; do
   echo "========== verl attempt $attempt =========="
   run_verl 2>&1 | tee "$ATT"

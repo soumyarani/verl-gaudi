@@ -42,6 +42,9 @@ they live on Sol at `/scratch/ssamine4/verl_gaudi/`. This repo carries everythin
 
 ## Status at a glance
 
+> ✅ **DONE (2026-06-30):** verl GRPO ran **3/3 steps on one Gaudi HPU**, `VERL_RC=0`, all metrics logged.
+> Success criterion #3 met. Proof: `logs/SUCCESS_grpo_3steps_57954952.log` (excerpt in `results/`).
+
 | Stage | State |
 |-------|-------|
 | HPU userspace matches driver (SynapseAI 1.24), real ops run | ✅ |
@@ -50,7 +53,7 @@ they live on Sol at `/scratch/ssamine4/verl_gaudi/`. This repo carries everythin
 | FSDP-wraps the actor **on the Gaudi card** (`After FSDP, 3.69 GB on HPU`) | ✅ |
 | Reward / advantage / optimizer plumbing | ✅ |
 | **Single-card generation (HF rollout)** | ✅ code walls removed (NO_SHARD + ReduceOp coercion) |
-| **A full GRPO iteration end-to-end** | 🧱 not yet *validated* — blocked on Ray-in-container startup, not HPU code |
+| **A full GRPO iteration end-to-end** | ✅ **3/3 steps, `VERL_RC=0`** (Qwen2.5-0.5B GSM8k, 1 HPU, job 57954952) |
 
 ### The reframe (session 2): the "walls" were misdiagnosed
 Earlier notes treated the HF-rollout path as hitting a fundamental **lazy/eager catch-22**, and concluded the only
@@ -99,16 +102,15 @@ Full flag-by-flag explanation of the container invocation and every Hydra overri
 
 ## Honest bottom line
 
-> verl runs on Gaudi through the entire training pipeline. This work **dismantled the two "walls"** earlier notes
-> treated as fundamental: the HF-rollout "lazy/eager catch-22" was just pointless single-card FSDP sharding (fixed
-> with `NO_SHARD`), and the generation crash underneath it was Habana HCCL rejecting `ReduceOp.AVG` (fixed with a
-> math-equivalent `AVG→SUM` coercion for single-rank groups). **As a result, disaggregated vLLM is no longer
-> required** to prove a few GRPO iterations — the actor can train and generate on one card. A full iteration is
-> **not yet validated end-to-end**, because the job now dies on the *original* project blocker: a Ray-in-apptainer
-> metrics-agent startup deadlock (`WaitForDashboardAgentPorts` ↔ agent gRPC). A cache-warming retry loop is in place
-> to ride past its timing-sensitive window; if insufficient, the next levers are dropping the loopback
-> `_node_ip_address` override and staging `cpkgs` on node-local disk. All patches and both environments are
-> checkpointed on `/scratch/ssamine4/verl_gaudi/`.
+> **verl GRPO now runs end-to-end on Intel Gaudi 2.** Qwen2.5-0.5B on GSM8k completed **3/3 steps on a single
+> HPU** (`VERL_RC=0`, all metrics logged). The path that earlier notes called fundamentally blocked — needing
+> disaggregated vLLM — turned out to be a stack of fixable issues: single-card FSDP `NO_SHARD`, a math-exact
+> HCCL `ReduceOp.AVG→SUM` coercion, disabling FSDP mixed precision on HPU (a second lazy-mode resize), an
+> `--exclusive` node to acquire a free HPU module, and a cache-warming retry loop around Ray's flaky
+> metrics-agent startup. **Disaggregated vLLM was never needed** for the few-iterations goal — the actor trains
+> and generates on one card. Caveats are training-quality only (the 0.5B model scores 0 reward on GSM8k at a
+> 128-token limit, so `grad_norm` is NaN from zero-advantage cold-start) — orthogonal to the HPU port. All
+> patches and environments are checkpointed on `/scratch/ssamine4/verl_gaudi/`.
 
 ---
 

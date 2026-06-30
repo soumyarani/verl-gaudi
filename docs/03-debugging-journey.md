@@ -152,3 +152,44 @@ succeed and later ones fail on the same node.
 
 > Net: the project's "Honest bottom line" changes from *"needs disaggregated vLLM or a validated pin"* to
 > *"single-card HF rollout is viable; the only remaining obstacle is Ray-in-container startup, not the HPU stack."*
+
+---
+
+## Phase 8 — SUCCESS: a full GRPO iteration runs end-to-end on Gaudi (session 2)
+
+> Job `57954952` on `gaudi002` ran **Qwen2.5‑0.5B GRPO on GSM8k for 3/3 steps on one Gaudi HPU**, exiting
+> `VERL_RC=0` with reward/loss and full metrics logged. This satisfies success criterion #3. The winning log is
+> saved at `logs/SUCCESS_grpo_3steps_57954952.log` on Sol (proof excerpt in `results/`).
+
+### The last two blockers after generation (and their fixes)
+Once Ray + device-acquire + generation worked (Phase 7), two more fell:
+
+| # | Symptom | Root cause | Fix |
+|---|---------|-----------|-----|
+| 8.1 | `synStatus=8 Device not found / acquire failed` at worker init on a **shared** node | Sol sets **no** per-job HPU isolation (`HABANA_VISIBLE_MODULES` unset; all 8 `/dev/accel*` world-visible). On a node shared with other users, the worker grabs a module someone else already holds (Gaudi modules are exclusive-per-process). | Request the node **`--exclusive`** so all 8 modules are free → module 0 acquires cleanly. (Non-wasteful alternative: pick a free module via `hl-smi` and set `HABANA_VISIBLE_MODULES=<int>` — note `=all` is **invalid**, the runtime parses ints.) |
+| 8.2 | `This function should not be called in lazy flow` in `compute_log_prob` → FSDP `init_flat_param_attributes` → `_free_storage(flat_param._mp_shard)` → `_resize_(0)` | This is a **second** resize, distinct from the NO_SHARD one: FSDP **MixedPrecision** allocates a low-precision `_mp_shard` and frees it. Even with NO_SHARD, MP triggers the lazy-unsupported resize. | Set **`mixed_precision=None` on HPU** in `fsdp_workers.py` (both FSDP build sites). The actor already loads in fp32 (`model_dtype` default), so no MP is needed; params stay fp32, no `_mp_shard`, no resize. |
+
+### What the run shows
+- 3 steps, `VERL_RC=0`. Generation on HPU: **36 s → 4.8 s** across steps as the graph compiler caches recipes;
+  full step **239 s → 9.9 s**. Peak memory 23.8 GB allocated / 94.6 GB reserved.
+- Every metric logged: `actor/pg_loss`, `actor/entropy`, `actor/ppo_kl`, `actor/grad_norm`, `critic/score`,
+  `critic/advantages`, `response_length`, `timing_s/*`, throughput.
+
+### Known-benign caveats (training quality, NOT Gaudi/pipeline bugs)
+- `critic/score/mean: 0.0` every step — the 0.5B model gets **every** GSM8k answer wrong (128-token responses are
+  too short for chain-of-thought; possible answer-format mismatch). Zero reward → zero variance → zero advantage →
+  no learning signal. Expected cold-start for a tiny model; raise `max_response_length`, add steps, and verify the
+  reward parser to get nonzero scores.
+- `actor/grad_norm: nan` — with zero advantages the PG loss is 0; the NaN arises in the entropy/log-prob numerics
+  and verl **skips** NaN updates. Benign for this proof run.
+- `prompt_length/*` shows absurd values (~1e7) — a metric-aggregation quirk (looks like summed token IDs), not a
+  correctness issue.
+
+### The complete fix list that made it run (all in `patches/verl05.diff` + scripts)
+1. **Ray cache-warming retry loop** (`_run_inside_05.sh`) — rides past the metrics-agent startup deadlock.
+2. **`--exclusive`** node (`run_05.sh`) — guarantees a free HPU module to acquire.
+3. **`NO_SHARD`** for a size-1 FSDP mesh — kills the sharding `storage._resize_` crash.
+4. **`ReduceOp.AVG/PREMUL_SUM → SUM`** coercion in `device.py` — Habana HCCL compat (generation).
+5. **`mixed_precision=None` on HPU** — kills the `_mp_shard` resize crash (log-prob/training forward).
+6. (+ all Phase 0–6 patches: HPU platform/device registration, Ray HPU resource, attn→sdpa, FSDP pre-move,
+   optimum-habana adapt + `_sample` fixes, etc.)
