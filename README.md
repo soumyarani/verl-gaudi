@@ -7,6 +7,9 @@ explanation of *why* each change was needed.
 Target run: GRPO post-training of **Qwen2.5-0.5B-Instruct** on **GSM8k**, on the ASU **Sol** supercomputer's
 `gaudi` partition (8× HL-225, SynapseAI 1.24).
 
+> **Reproducing from scratch?** Read [`SETUP.md`](SETUP.md) — exact, tested, step-by-step. The complete
+> Gaudi-modified verl source is in [`verl05-gaudi/`](verl05-gaudi/) (full tree) and `patches/verl05.diff` (diff).
+
 ---
 
 ## What this repo is
