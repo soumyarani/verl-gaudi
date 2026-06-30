@@ -1,0 +1,8 @@
+torch==2.10.0a0+gitc1e5ed4
+vllm==0.21.0+empty
+vllm_gaudi==0.21.0
+transformers==5.9.0
+numpy==2.2.6
+pandas==2.3.3
+torchvision==0.25.0+cpu
+torchaudio==2.10.0+cpu

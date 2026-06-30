@@ -1,0 +1,226 @@
+diff --git a/verl/single_controller/ray/base.py b/verl/single_controller/ray/base.py
+index b692206..4ec5a7c 100644
+--- a/verl/single_controller/ray/base.py
++++ b/verl/single_controller/ray/base.py
+@@ -111,6 +111,8 @@ class RayResourcePool(ResourcePool):
+             device_name = "NPU"
+         elif device_name == "cuda":
+             device_name = "GPU"
++        elif device_name == "hpu":
++            device_name = "HPU"
+ 
+         bundle = {"CPU": self.max_colocate_count}
+         if self.use_gpu:
+@@ -241,6 +243,8 @@ class RayClassWithInitArgs(ClassWithInitArgs):
+             options["num_gpus"] = num_gpus
+         if use_gpu and device_name == "npu":
+             options["resources"] = {"NPU": num_gpus}
++        if use_gpu and device_name == "hpu":
++            options["resources"] = {"HPU": num_gpus}
+ 
+         if len(self._additional_resource) > 1:
+             for k, v in self._additional_resource.items():
+diff --git a/verl/trainer/main_ppo.py b/verl/trainer/main_ppo.py
+index a9ea554..906b87c 100644
+--- a/verl/trainer/main_ppo.py
++++ b/verl/trainer/main_ppo.py
+@@ -55,9 +55,14 @@ def run_ppo(config) -> None:
+         # Set environment variables in the runtime environment to control tokenizer parallelism,
+         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
+         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
++        import os as _os
+         ray.init(
+             runtime_env=get_ppo_ray_runtime_env(),
+             num_cpus=config.ray_init.num_cpus,
++            num_gpus=0,
++            resources={"HPU": 8},
++            _node_ip_address="127.0.0.1",
++            _temp_dir=_os.environ.get("RAY_TMPDIR"),
+         )
+ 
+     # Create a remote instance of the TaskRunner class, and
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index 45ed80a..3080e6c 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -120,7 +120,7 @@ class ResourcePoolManager:
+         """Check if the resource pool can be satisfied in this ray cluster."""
+         node_available_resources = ray.state.available_resources_per_node()
+         node_available_gpus = {
+-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
++            node: node_info.get("GPU", 0) if "GPU" in node_info else (node_info.get("NPU", 0) if "NPU" in node_info else node_info.get("HPU", 0))
+             for node, node_info in node_available_resources.items()
+         }
+ 
+diff --git a/verl/utils/device.py b/verl/utils/device.py
+index ed85b0d..066ad11 100644
+--- a/verl/utils/device.py
++++ b/verl/utils/device.py
+@@ -29,12 +29,55 @@ is_cuda_available = torch.cuda.is_available()
+ is_npu_available = is_torch_npu_available()
+ 
+ 
++def is_torch_hpu_available() -> bool:
++    """Check the availability of Intel Gaudi HPU"""
++    try:
++        import habana_frameworks.torch  # noqa: F401
++        return hasattr(torch, "hpu") and torch.hpu.is_available()
++    except Exception:
++        return False
++
++
++is_hpu_available = is_torch_hpu_available()
++
++if is_hpu_available:
++    try:
++        import functools as _ft
++        import transformers.file_utils as _fu
++        try:
++            import transformers.utils as _tu
++        except Exception:
++            _tu = None
++        for _n in ("cached_property", "is_torch_available", "requires_backends", "torch_required", "add_start_docstrings"):
++            if not hasattr(_fu, _n) and _tu is not None and hasattr(_tu, _n):
++                setattr(_fu, _n, getattr(_tu, _n))
++        if not hasattr(_fu, "cached_property"):
++            _fu.cached_property = _ft.cached_property
++        from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
++        adapt_transformers_to_gaudi()
++        logger.warning("optimum-habana: adapted transformers generate to Gaudi")
++    except Exception as _e:
++        logger.warning(f"optimum-habana adapt skipped: {_e}")
++
++# Some Habana torch builds lack torch.hpu.empty_cache; verl calls it via
++# get_torch_device().empty_cache(). Provide a no-op shim when missing.
++if is_hpu_available and hasattr(torch, "hpu") and not hasattr(torch.hpu, "empty_cache"):
++    try:
++        torch.hpu.empty_cache = lambda *a, **k: None
++    except Exception:
++        pass
++
++
+ def get_visible_devices_keyword() -> str:
+     """Function that gets visible devices keyword name.
+     Returns:
+         'CUDA_VISIBLE_DEVICES' or `ASCEND_RT_VISIBLE_DEVICES`
+     """
+-    return "CUDA_VISIBLE_DEVICES" if is_cuda_available else "ASCEND_RT_VISIBLE_DEVICES"
++    if is_cuda_available:
++        return "CUDA_VISIBLE_DEVICES"
++    if is_hpu_available:
++        return "HABANA_VISIBLE_MODULES"
++    return "ASCEND_RT_VISIBLE_DEVICES"
+ 
+ 
+ def get_device_name() -> str:
+@@ -47,6 +90,8 @@ def get_device_name() -> str:
+         device = "cuda"
+     elif is_npu_available:
+         device = "npu"
++    elif is_hpu_available:
++        device = "hpu"
+     else:
+         device = "cpu"
+     return device
+@@ -80,7 +125,7 @@ def get_nccl_backend() -> str:
+     """
+     if is_cuda_available:
+         return "nccl"
+-    elif is_npu_available:
++    elif is_npu_available or is_hpu_available:
+         return "hccl"
+     else:
+         raise RuntimeError(f"No available nccl backend found on device type {get_device_name()}.")
+diff --git a/verl/workers/fsdp_workers.py b/verl/workers/fsdp_workers.py
+index 4141d98..882b54d 100644
+--- a/verl/workers/fsdp_workers.py
++++ b/verl/workers/fsdp_workers.py
+@@ -251,7 +251,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+ 
+         # override model kwargs
+         actor_model_config = AutoConfig.from_pretrained(
+-            local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
++            local_path, trust_remote_code=trust_remote_code, attn_implementation="sdpa"
+         )
+ 
+         # patch for kimi-vl
+@@ -368,6 +368,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+         fsdp_strategy = self.config.actor.strategy
+         if fsdp_strategy == "fsdp":
++            if get_device_name() == "hpu":
++                actor_module = actor_module.to(get_device_name())  # HPU: pre-move (FSDP1 set_data fix)
+             actor_module_fsdp = FSDP(
+                 actor_module,
+                 cpu_offload=cpu_offload,
+@@ -1014,7 +1016,7 @@ class CriticWorker(Worker, DistProfilerExtension):
+ 
+         critic_model_config = AutoConfig.from_pretrained(
+             local_path,
+-            attn_implementation="flash_attention_2",
++            attn_implementation="sdpa",
+             trust_remote_code=config.model.get("trust_remote_code", False),
+         )
+         critic_model_config.num_labels = 1
+@@ -1376,7 +1378,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
+                 pretrained_model_name_or_path=local_path,
+                 config=model_config,
+                 torch_dtype=torch.bfloat16,
+-                attn_implementation="flash_attention_2",
++                attn_implementation="sdpa",
+                 trust_remote_code=trust_remote_code,
+             )
+ 
+diff --git a/verl/workers/rollout/hf_rollout.py b/verl/workers/rollout/hf_rollout.py
+index 32d0bc8..279e0a5 100644
+--- a/verl/workers/rollout/hf_rollout.py
++++ b/verl/workers/rollout/hf_rollout.py
+@@ -85,16 +85,17 @@ class HFRollout(BaseRollout):
+                 "top_p": top_p,
+                 "top_k": top_k,
+                 "temperature": temperature,
+-                "num_return_sequences": self.config.n,
++                "num_return_sequences": 1,  # trainer already repeats gen_batch by n (interleave)
+             }
+ 
+         # make config according to generate mode
+         generation_config = GenerationConfig(**kwargs)
+ 
+-        idx = prompts.batch["input_ids"]  # (bs, prompt_length)
++        _dev = get_device_name()
++        idx = prompts.batch["input_ids"].to(_dev)  # (bs, prompt_length)
+         prompt_length = idx.size(1)
+-        attention_mask = prompts.batch["attention_mask"]  # left-padded attention_mask
+-        position_ids = prompts.batch["position_ids"]
++        attention_mask = prompts.batch["attention_mask"].to(_dev)  # left-padded attention_mask
++        position_ids = prompts.batch["position_ids"].to(_dev)
+ 
+         # used to construct attention_mask
+         eos_token_id = prompts.meta_info["eos_token_id"]
+@@ -103,19 +104,23 @@ class HFRollout(BaseRollout):
+         self.module.eval()
+         param_ctx = contextlib.nullcontext()
+ 
+-        if isinstance(self.module, FSDP):
++        if isinstance(self.module, FSDP) and get_device_name() != "hpu":
+             # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
+             param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+-        with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
++        # HPU: skip summon_full_params (its storage._resize_ is unsupported in lazy mode);
++        # FSDP gathers params per-forward during generate, which is fine on a single device.
++        with param_ctx:  # HPU: drop bf16 autocast so generate dtypes match optimum-habana static cache
+             output = self.module.generate(
+                 input_ids=idx,
+                 attention_mask=attention_mask,
+-                position_ids=position_ids,
+                 do_sample=do_sample,
+                 max_new_tokens=response_length,
+                 eos_token_id=eos_token_id,
+                 pad_token_id=pad_token_id,
+                 generation_config=generation_config,
++                lazy_mode=True,
++                hpu_graphs=False,
++                ignore_eos=False,
+                 output_scores=False,  # this is potentially very large
+                 return_dict_in_generate=True,
+                 use_cache=True,

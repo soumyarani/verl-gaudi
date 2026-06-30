@@ -1,0 +1,295 @@
+diff --git a/verl/plugin/platform/platform_hpu.py b/verl/plugin/platform/platform_hpu.py
+new file mode 100644
+index 0000000..341d54b
+--- /dev/null
++++ b/verl/plugin/platform/platform_hpu.py
+@@ -0,0 +1,177 @@
++# Intel Gaudi (HPU) platform implementation for verl.
++# Mirrors platform_npu.py; added to support Intel Gaudi 2/3 accelerators
++# via habana_frameworks.torch (SynapseAI).
++
++import logging
++import os
++from contextlib import contextmanager
++from types import ModuleType
++from typing import Any, Optional
++
++import enum as _enum
++if not hasattr(_enum, "StrEnum"):
++    class _StrEnum(str, _enum.Enum):
++        def __str__(self):
++            return str(self.value)
++    _enum.StrEnum = _StrEnum
++import torch
++
++from .platform_base import PlatformBase
++from .platform_manager import PlatformRegistry
++
++logger = logging.getLogger(__name__)
++
++
++def _ensure_torch_hpu() -> bool:
++    """Try to import habana_frameworks.torch so that torch.hpu becomes available.
++
++    Returns True if torch.hpu is usable after the attempt.
++    """
++    if hasattr(torch, "hpu"):
++        return True
++    try:
++        import habana_frameworks.torch  # noqa: F401
++
++        return hasattr(torch, "hpu")
++    except Exception as e:
++        logger.debug("The current machine has no torch.hpu, because: %s", e)
++    return False
++
++
++_ensure_torch_hpu()  # Attempt habana import at module load so availability checks are fast later
++
++# Some Habana torch builds (e.g. torch 2.7.1) lack torch.hpu.empty_cache, which verl calls
++# directly via get_torch_device().empty_cache(). Provide a no-op shim when missing.
++if hasattr(torch, "hpu") and not hasattr(torch.hpu, "empty_cache"):
++    try:
++        torch.hpu.empty_cache = lambda *a, **k: None
++    except Exception:
++        pass
++
++
++@PlatformRegistry.register(platform="hpu")
++class PlatformHPU(PlatformBase):
++    """Platform backend for Intel Gaudi (HPU)."""
++
++    # ------------------------------------------------------------------
++    # Core device management
++    # ------------------------------------------------------------------
++
++    @property
++    def device_name(self) -> str:
++        return "hpu"
++
++    @property
++    def vendor_name(self) -> str:
++        return "intel"
++
++    @property
++    def device_module(self) -> ModuleType:
++        return torch.hpu
++
++    def is_available(self) -> bool:
++        return _ensure_torch_hpu() and torch.hpu.is_available()
++
++    def is_platform_available(self, use_smi_check=False) -> bool:
++        if not _ensure_torch_hpu():
++            return False
++        if use_smi_check:
++            # habana_frameworks.torch imported successfully -> HPU environment confirmed
++            return True
++        return torch.hpu.is_available()
++
++    def current_device(self) -> int:
++        return torch.hpu.current_device()
++
++    def device_count(self) -> int:
++        return torch.hpu.device_count()
++
++    def set_device(self, device_index: int) -> None:
++        torch.hpu.set_device(device_index)
++
++    def synchronize(self, device_index: Optional[int] = None) -> None:
++        torch.hpu.synchronize()
++
++    # ------------------------------------------------------------------
++    # Random number generator
++    # ------------------------------------------------------------------
++
++    def manual_seed(self, seed: int) -> None:
++        torch.hpu.manual_seed(seed)
++
++    def manual_seed_all(self, seed: int) -> None:
++        torch.hpu.manual_seed_all(seed)
++
++    # ------------------------------------------------------------------
++    # Memory management
++    # ------------------------------------------------------------------
++
++    def set_allocator_settings(self, settings: str) -> None:
++        # Gaudi has no public allocator-tuning API equivalent to CUDA; no-op.
++        logger.debug("set_allocator_settings is a no-op on HPU (requested: %s)", settings)
++
++    def empty_cache(self) -> None:
++        if hasattr(torch.hpu, "empty_cache"):
++            torch.hpu.empty_cache()
++
++    # ------------------------------------------------------------------
++    # Device properties
++    # ------------------------------------------------------------------
++
++    def get_device_capability(self, device_index: int = 0) -> tuple[Optional[int], Optional[int]]:
++        return (None, None)
++
++    # ------------------------------------------------------------------
++    # Distributed communication
++    # ------------------------------------------------------------------
++
++    def communication_backend_name(self) -> str:
++        return "hccl"
++
++    def visible_devices_envvar(self) -> str:
++        return "HABANA_VISIBLE_MODULES"
++
++    # ------------------------------------------------------------------
++    # Ray integration
++    # ------------------------------------------------------------------
++
++    def ray_resource_name(self) -> str:
++        return "HPU"
++
++    def ray_resource_options(self, num_gpus: float) -> dict[str, Any]:
++        return {"resources": {"HPU": num_gpus}}
++
++    def ray_noset_envvars(self) -> list[str]:
++        return ["RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES"]
++
++    def rollout_env_vars(self) -> dict[str, str]:
++        return {}
++
++    # ------------------------------------------------------------------
++    # IPC support
++    # ------------------------------------------------------------------
++
++    def is_ipc_supported(self) -> bool:
++        return False
++
++    # ------------------------------------------------------------------
++    # Profiling helpers
++    # ------------------------------------------------------------------
++
++    @contextmanager
++    def nvtx_range(self, msg: str):
++        logger.debug("NVTX range (no-op on HPU): %s", msg)
++        yield
++
++    def profiler_start(self) -> None:
++        pass
++
++    def profiler_stop(self) -> None:
++        pass
++
++    # ------------------------------------------------------------------
++    # Low-level runtime API
++    # ------------------------------------------------------------------
++
++    def cudart(self) -> Any:
++        return None
+diff --git a/verl/plugin/platform/platform_manager.py b/verl/plugin/platform/platform_manager.py
+index 17f297b..68d102f 100644
+--- a/verl/plugin/platform/platform_manager.py
++++ b/verl/plugin/platform/platform_manager.py
+@@ -172,3 +172,4 @@ def set_platform(platform: PlatformBase) -> None:
+ from .platform_cuda import PlatformCUDA  # noqa: E402, F401
+ from .platform_npu import PlatformNPU  # noqa: E402, F401
+ from .platform_rocm import PlatformROCm  # noqa: E402, F401
++from .platform_hpu import PlatformHPU  # noqa: E402, F401
+diff --git a/verl/single_controller/ray/base.py b/verl/single_controller/ray/base.py
+index bb6a604..afb4349 100644
+--- a/verl/single_controller/ray/base.py
++++ b/verl/single_controller/ray/base.py
+@@ -227,7 +227,7 @@ class ResourcePoolManager:
+         """Check if the resource pool can be satisfied in this ray cluster."""
+         node_available_resources = ray._private.state.available_resources_per_node()
+         node_available_gpus = {
+-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
++            node: node_info.get(get_platform().ray_resource_name(), node_info.get("GPU", node_info.get("NPU", 0)))
+             for node, node_info in node_available_resources.items()
+         }
+ 
+diff --git a/verl/utils/model.py b/verl/utils/model.py
+index 9b6a430..ec80395 100644
+--- a/verl/utils/model.py
++++ b/verl/utils/model.py
+@@ -642,7 +642,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
+             pretrained_model_name_or_path=local_path,
+             torch_dtype=torch_dtype,
+             config=model_config,
+-            attn_implementation="flash_attention_2",
++            attn_implementation="sdpa",
+             trust_remote_code=trust_remote_code,
+         )
+         return model
+@@ -664,7 +664,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
+         pretrained_model_name_or_path=local_path,
+         torch_dtype=torch_dtype,
+         config=model_config,
+-        attn_implementation="flash_attention_2",
++        attn_implementation="sdpa",
+         trust_remote_code=trust_remote_code,
+     )
+     # vlm models
+diff --git a/verl/workers/config/engine.py b/verl/workers/config/engine.py
+index 2c3a8db..2bc623e 100644
+--- a/verl/workers/config/engine.py
++++ b/verl/workers/config/engine.py
+@@ -368,7 +368,7 @@ class VeOmniEngineConfig(EngineConfig):
+     load_checkpoint_path: Optional[str] = None
+     enable_fsdp_offload: bool = False
+     enable_reentrant: bool = False
+-    attn_implementation: str = "flash_attention_2"
++    attn_implementation: str = "sdpa"
+     moe_implementation: str = "fused"
+     # Kernel-backend selectors for VeOmni's per-model patches; passed into
+     # OpsImplementationConfig and consumed by apply_per_model_patches in each
+@@ -566,7 +566,7 @@ class AutomodelEngineConfig(EngineConfig):
+     enable_fp8: bool = False
+     enable_compile: bool = False
+     model_dtype: str = "fp32"
+-    attn_implementation: str = "flash_attention_2"
++    attn_implementation: str = "sdpa"
+     # Backend settings
+     backend_config: dict = field(default_factory=dict)
+     # MoE settings
+diff --git a/verl/workers/config/model.py b/verl/workers/config/model.py
+index 2eab936..980473c 100644
+--- a/verl/workers/config/model.py
++++ b/verl/workers/config/model.py
+@@ -182,7 +182,7 @@ class HFModelConfig(BaseConfig):
+         )
+ 
+         # construct hf_config
+-        attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
++        attn_implementation = self.override_config.get("attn_implementation", "sdpa")
+         self.hf_config = AutoConfig.from_pretrained(
+             self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
+         )
+diff --git a/verl/workers/engine/fsdp/transformer_impl.py b/verl/workers/engine/fsdp/transformer_impl.py
+index bc01062..f44d4a3 100644
+--- a/verl/workers/engine/fsdp/transformer_impl.py
++++ b/verl/workers/engine/fsdp/transformer_impl.py
+@@ -582,6 +582,10 @@ class FSDPEngine(BaseEngine):
+ 
+         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
+         log_gpu_memory_usage("Before FSDP", logger=None)
++        # HPU: FSDP1 cannot move CPU params to HPU during wrap (set_data incompatible tensor type);
++        # pre-move so FSDP1's device_id move is a no-op.
++        if get_device_name() == "hpu" and self.engine_config.strategy in ("fsdp", "fsdp1"):
++            module = module.to(get_device_name())
+         module = self._build_fsdp_module(module)
+         log_gpu_memory_usage("After FSDP", logger=None)
+ 
+@@ -942,7 +946,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
+         super().__exit__(exc_type, exc_value, traceback)
+ 
+ 
+-@EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
++@EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "hpu"])
+ class FSDPEngineWithLMHead(FSDPEngine):
+     def prepare_model_inputs(self, micro_batch: TensorDict):
+         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+@@ -1348,7 +1352,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
+             return loss, output
+ 
+ 
+-@EngineRegistry.register(model_type="value_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
++@EngineRegistry.register(model_type="value_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "hpu"])
+ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
+     """
+     The only difference between critic and actor is how the raw model output is processed
