@@ -44,3 +44,23 @@ PYTHONUSERBASE=/scratch/ssamine4/verl_gaudi/cpkgs /usr/bin/python3.10 patches/en
 3. Install `transformers==4.49`, `optimum-habana==1.18` (`scripts/install_oh18.sh`) under `cpkgs`.
 4. `patch_oh_ver.py`, `patch_oh_eos.py`, `patch_oh_guard.py`, `patch_ray.py`.
 5. `sbatch scripts/run_05.sh`.
+
+## Session-2 patches (now folded into `verl05.diff`)
+
+These were added in the "fresh-eyes" pass and are part of the regenerated `verl05.diff`:
+
+| Where | Change | Why |
+|-------|--------|-----|
+| `verl/workers/fsdp_workers.py` `get_sharding_strategy` | return `ShardingStrategy.NO_SHARD` when `device_mesh.size()==1` | `FULL_SHARD` on one card emits `storage._resize_` ops HPU lazy mode can't do → native crash in `generate`. NO_SHARD keeps params resident. |
+| `verl/utils/device.py` | coerce `ReduceOp.AVG/PREMUL_SUM → SUM` for `world_size==1` groups | Habana HCCL rejects AVG (`hccl_kernels.cpp:158`); on 1 rank the reduction is the identity so SUM is exact. Kept in `device.py` (verl-only) so it does NOT load `torch` in Ray helper processes. |
+| `verl/trainer/main_ppo.py` ray.init | `include_dashboard=False` | minor; the raylet still waits for the metrics agent, so this alone does not fix the agent deadlock. |
+
+Script changes (in `scripts/`):
+- `_run_inside_05.sh`: **cache-warming Ray retry loop** — runs `main_ppo` up to 4×, `clean_ray()` between attempts
+  (kill `gcs_server`/`raylet`/`dashboard`/`plasma`, wipe `RAY_TMPDIR`); only retries *infra* signatures
+  (GCS/agent/Device-acquire), breaks on real training errors. Rides past the timing-sensitive metrics-agent deadlock.
+- `run_05.sh`: `RAY_raylet_start_wait_time_s=600`; preserve `logs/raylogs_<JID>/{raylet,gcs_server,dashboard*}.*`
+  on failure; `--exclude` stuck-HPU-module nodes.
+
+> See [`../docs/03-debugging-journey.md`](../docs/03-debugging-journey.md) **Phase 7** for the full root-cause story,
+> and [`../docs/memory.md`](../docs/memory.md) for current state + next levers.

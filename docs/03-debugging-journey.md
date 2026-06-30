@@ -85,3 +85,70 @@ Legend: 🟢 fixed · 🧱 architectural wall · 🔧 infra/config
 2. **HF path:** runs inference *through* the FSDP training graph → FSDP storage ops and HF-generate view ops demand opposite Habana execution modes. **Fix = don't run inference through FSDP; use a real inference engine (= back to vLLM, disaggregated).**
 
 Both arrows point to the same next step: **disaggregated vLLM-gaudi** (separate HPU modules for actor vs. rollout).
+
+---
+
+## Phase 7 — The fresh-eyes pass: the "walls" were misdiagnosed (session 2)
+
+> This phase revisited the two "architectural walls" from Phases 5–6 with fresh eyes and found that the HF-rollout
+> wall was **not** a fundamental lazy/eager catch-22. Two surgical fixes removed it; the blocker that remains is
+> infrastructure (Ray startup), not HPU/verl code.
+
+### 7.1 🟢 The "catch-22" was just pointless single-card FSDP
+The Phase-6 conclusion was: FSDP `summon_full_params` needs **eager**, optimum-habana generate needs **lazy**, no
+single mode satisfies both. Re-examination: with `n_gpus_per_node=1` the FSDP device mesh has **size 1**, so
+`get_sharding_strategy` returns `FULL_SHARD` — which still does the `storage._resize_(0)` free/gather dance on every
+forward (via FSDP's own pre/post-forward hooks, not just the explicit `summon_full_params`). That resize is the only
+thing that needs eager, and on one card the sharding it implements is a **no-op**.
+
+| Symptom | Fix | Result |
+|---------|-----|--------|
+| Worker dies (native SIGABRT, "connection error code 2 / EOF") inside `generate_sequences`, even with `summon_full_params` already skipped | `get_sharding_strategy`: return **`ShardingStrategy.NO_SHARD`** when `device_mesh.size()==1` (params stay resident, DDP-style, no resize ops) | Crash gone — next run reached a **new, deeper** error (7.2), proving the wall was removed |
+
+Lesson: on a single accelerator, **`FULL_SHARD` buys nothing and costs the resize ops that break HPU lazy mode.**
+`NO_SHARD` is the correct strategy for a size-1 mesh on any backend; on HPU it's the difference between crash and run.
+
+### 7.2 🟢 The real generation blocker: Habana HCCL rejects `ReduceOp.AVG`
+With NO_SHARD, the worker got further and died on a *different* native assert:
+```
+Unhandled exception: Unsupported ReduceOp for HCCL process group
+  hcclRedOp_t habana::getHCCLReduceOp(...)  hccl_kernels.cpp:158
+```
+Some collective issues `ReduceOp.AVG` (or `PREMUL_SUM`), which Habana's HCCL does not implement (it supports
+SUM/MIN/MAX). The key insight: on a **world_size==1** process group, every collective is a mathematical **identity**
+(one rank reducing with itself), so the ReduceOp is irrelevant to the result.
+
+| Symptom | Fix | Notes |
+|---------|-----|-------|
+| `Unsupported ReduceOp for HCCL` on a background `JobThread` during generation | Coerce `AVG/PREMUL_SUM → SUM` for `world_size==1` groups, installed in `verl/utils/device.py` | Math-exact for 1 rank. **Don't** install it as a global `usercustomize.py` — that drags `import torch` into every Ray helper process and breaks raylet startup (7.3). Scope it to verl modules only. |
+
+### 7.3 🧱 The original blocker returns: Ray metrics-agent startup deadlock
+Once the code walls fell, runs kept dying at **Ray init**. The captured raylet/agent logs (run `run_05.sh` now
+preserves `logs/raylogs_<JID>/` on failure) show the true mechanism:
+```
+raylet : Timed out waiting for file .../metrics_agent_port_...  -> Check failed -> SIGABRT
+              ray::raylet::NodeManager::WaitForDashboardAgentPorts()
+agent  : RPC error: Deadline Exceeded  (reporter_agent -> raylet async_get_agent_pids)
+driver : GCS cannot find the node ... node registration may not be complete
+```
+The raylet's `NodeManager` constructor **blocks** waiting for the agent to write its port file; the agent
+**blocks** on a gRPC to the raylet → **mutual deadlock**. It's **timing-sensitive** — only fires when the agent
+imports slowly (cold page cache, imports off the shared `cpkgs` FS), which is why the first run of a session can
+succeed and later ones fail on the same node.
+
+| Thing tried | Outcome |
+|-------------|---------|
+| `include_dashboard=False` in ray.init | No effect — the **raylet** waits for the agent regardless of the dashboard head |
+| `RAY_agent_register_timeout_ms=300000`, `RAY_raylet_start_wait_time_s=600` | Raylet still aborts on the agent-port wait (~113 s) |
+| Excluding nodes / `pkill` stale Ray | Helps when the cause is a *poisoned* node (my own leftovers) or a *stuck HPU module* (`synStatus=8 Device acquire failed`), but not the cold-import deadlock |
+| **Cache-warming retry loop** (`_run_inside_05.sh` runs `main_ppo` up to 4×, cleaning Ray between attempts) | The intended fix: attempt 1 warms the page cache so the agent imports fast enough to win the race on the retry. Only retries *infra* signatures; breaks immediately on real training errors. |
+
+### 7.4 Where it stands
+- **Code walls: removed.** NO_SHARD + ReduceOp coercion mean the actor can train *and* generate on **one card** —
+  **disaggregated vLLM is no longer required** for the "few iterations" goal.
+- **Infra blocker: active.** The Ray metrics-agent deadlock is the last thing between the current state and a
+  validated GRPO iteration. Retry mitigation is in; if insufficient, next levers (in order): drop the loopback
+  `_node_ip_address` override, stage `cpkgs` on node-local disk, or pre-start a head node with the agent disabled.
+
+> Net: the project's "Honest bottom line" changes from *"needs disaggregated vLLM or a validated pin"* to
+> *"single-card HF rollout is viable; the only remaining obstacle is Ray-in-container startup, not the HPU stack."*

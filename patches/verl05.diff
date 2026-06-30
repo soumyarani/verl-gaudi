@@ -21,10 +21,10 @@ index b692206..4ec5a7c 100644
          if len(self._additional_resource) > 1:
              for k, v in self._additional_resource.items():
 diff --git a/verl/trainer/main_ppo.py b/verl/trainer/main_ppo.py
-index a9ea554..906b87c 100644
+index a9ea554..14e8b11 100644
 --- a/verl/trainer/main_ppo.py
 +++ b/verl/trainer/main_ppo.py
-@@ -55,9 +55,14 @@ def run_ppo(config) -> None:
+@@ -55,9 +55,15 @@ def run_ppo(config) -> None:
          # Set environment variables in the runtime environment to control tokenizer parallelism,
          # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
          # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
@@ -36,6 +36,7 @@ index a9ea554..906b87c 100644
 +            resources={"HPU": 8},
 +            _node_ip_address="127.0.0.1",
 +            _temp_dir=_os.environ.get("RAY_TMPDIR"),
++            include_dashboard=False,
          )
  
      # Create a remote instance of the TaskRunner class, and
@@ -53,10 +54,10 @@ index 45ed80a..3080e6c 100644
          }
  
 diff --git a/verl/utils/device.py b/verl/utils/device.py
-index ed85b0d..066ad11 100644
+index ed85b0d..c052fb2 100644
 --- a/verl/utils/device.py
 +++ b/verl/utils/device.py
-@@ -29,12 +29,55 @@ is_cuda_available = torch.cuda.is_available()
+@@ -29,12 +29,114 @@ is_cuda_available = torch.cuda.is_available()
  is_npu_available = is_torch_npu_available()
  
  
@@ -99,6 +100,65 @@ index ed85b0d..066ad11 100644
 +        pass
 +
 +
++# Habana HCCL rejects ReduceOp.AVG/PREMUL_SUM (hccl_kernels.cpp getHCCLReduceOp).
++# On a world_size==1 process group every collective is the identity, so the
++# ReduceOp is mathematically irrelevant -> coerce AVG/PREMUL_SUM to SUM.
++if is_hpu_available:
++    try:
++        import torch.distributed as _dist
++        from torch.distributed.distributed_c10d import ReduceOp as _RedOp
++
++        _BAD_OPS = [getattr(_RedOp, _n) for _n in ("AVG", "PREMUL_SUM") if hasattr(_RedOp, _n)]
++
++        def _coerce_op(op, group):
++            try:
++                bad = any(op == b for b in _BAD_OPS)
++            except Exception:
++                bad = False
++            if not bad:
++                return op
++            try:
++                ws = _dist.get_world_size(group) if _dist.is_initialized() else 1
++            except Exception:
++                ws = 1
++            return _RedOp.SUM if ws == 1 else op
++
++        if not getattr(_dist, "_hpu_redop_patched", False):
++            _o_ar = _dist.all_reduce
++
++            def _ar(tensor, op=_RedOp.SUM, group=None, async_op=False):
++                return _o_ar(tensor, op=_coerce_op(op, group), group=group, async_op=async_op)
++
++            _dist.all_reduce = _ar
++
++            if hasattr(_dist, "reduce_scatter_tensor"):
++                _o_rst = _dist.reduce_scatter_tensor
++
++                def _rst(output, input, op=_RedOp.SUM, group=None, async_op=False):
++                    return _o_rst(output, input, op=_coerce_op(op, group), group=group, async_op=async_op)
++
++                _dist.reduce_scatter_tensor = _rst
++
++            if hasattr(_dist, "_reduce_scatter_base"):
++                _o_rsb = _dist._reduce_scatter_base
++
++                def _rsb(output, input, op=_RedOp.SUM, group=None, async_op=False):
++                    return _o_rsb(output, input, op=_coerce_op(op, group), group=group, async_op=async_op)
++
++                _dist._reduce_scatter_base = _rsb
++
++            _o_red = _dist.reduce
++
++            def _red(tensor, dst, op=_RedOp.SUM, group=None, async_op=False):
++                return _o_red(tensor, dst, op=_coerce_op(op, group), group=group, async_op=async_op)
++
++            _dist.reduce = _red
++            _dist._hpu_redop_patched = True
++            logger.warning("HPU: ReduceOp AVG/PREMUL_SUM -> SUM coercion installed (world_size==1)")
++    except Exception as _e:
++        logger.warning(f"HPU ReduceOp coercion skipped: {_e}")
++
++
  def get_visible_devices_keyword() -> str:
      """Function that gets visible devices keyword name.
      Returns:
@@ -113,7 +173,7 @@ index ed85b0d..066ad11 100644
  
  
  def get_device_name() -> str:
-@@ -47,6 +90,8 @@ def get_device_name() -> str:
+@@ -47,6 +149,8 @@ def get_device_name() -> str:
          device = "cuda"
      elif is_npu_available:
          device = "npu"
@@ -122,7 +182,7 @@ index ed85b0d..066ad11 100644
      else:
          device = "cpu"
      return device
-@@ -80,7 +125,7 @@ def get_nccl_backend() -> str:
+@@ -80,7 +184,7 @@ def get_nccl_backend() -> str:
      """
      if is_cuda_available:
          return "nccl"
@@ -132,10 +192,25 @@ index ed85b0d..066ad11 100644
      else:
          raise RuntimeError(f"No available nccl backend found on device type {get_device_name()}.")
 diff --git a/verl/workers/fsdp_workers.py b/verl/workers/fsdp_workers.py
-index 4141d98..882b54d 100644
+index 4141d98..df8ca87 100644
 --- a/verl/workers/fsdp_workers.py
 +++ b/verl/workers/fsdp_workers.py
-@@ -251,7 +251,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+@@ -93,7 +93,13 @@ def create_device_mesh(world_size, fsdp_size):
+ def get_sharding_strategy(device_mesh):
+     from torch.distributed.fsdp import ShardingStrategy
+ 
+-    if device_mesh.ndim == 1:
++    if device_mesh.size() == 1:
++        # HPU single-card: sharding is a no-op, and FULL_SHARD's per-forward
++        # storage._resize_ (free/gather flat params) is unsupported in Habana
++        # lazy mode -> native crash inside generate(). NO_SHARD keeps params
++        # resident (DDP-style), so no resize ops are emitted.
++        sharding_strategy = ShardingStrategy.NO_SHARD
++    elif device_mesh.ndim == 1:
+         sharding_strategy = ShardingStrategy.FULL_SHARD
+     elif device_mesh.ndim == 2:
+         sharding_strategy = ShardingStrategy.HYBRID_SHARD
+@@ -251,7 +257,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
  
          # override model kwargs
          actor_model_config = AutoConfig.from_pretrained(
@@ -144,7 +219,7 @@ index 4141d98..882b54d 100644
          )
  
          # patch for kimi-vl
-@@ -368,6 +368,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+@@ -368,6 +374,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
          cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
          fsdp_strategy = self.config.actor.strategy
          if fsdp_strategy == "fsdp":
@@ -153,7 +228,7 @@ index 4141d98..882b54d 100644
              actor_module_fsdp = FSDP(
                  actor_module,
                  cpu_offload=cpu_offload,
-@@ -1014,7 +1016,7 @@ class CriticWorker(Worker, DistProfilerExtension):
+@@ -1014,7 +1022,7 @@ class CriticWorker(Worker, DistProfilerExtension):
  
          critic_model_config = AutoConfig.from_pretrained(
              local_path,
@@ -162,7 +237,7 @@ index 4141d98..882b54d 100644
              trust_remote_code=config.model.get("trust_remote_code", False),
          )
          critic_model_config.num_labels = 1
-@@ -1376,7 +1378,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
+@@ -1376,7 +1384,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                  pretrained_model_name_or_path=local_path,
                  config=model_config,
                  torch_dtype=torch.bfloat16,

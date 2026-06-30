@@ -81,3 +81,52 @@ If this fails with `synStatus 26`, your userspace doesn't match the driver — f
 | optimum-habana static-shape `generate` | **lazy** (`=1`) | designed around `mark_step` per token |
 | trivial tensor ops | either | both compile fine |
 The conflict between rows 1 and 2 is the core HF-path wall.
+
+---
+
+## Session-2 additions: single-card fixes + Ray startup robustness
+
+### Single-card FSDP must use NO_SHARD on HPU
+For `n_gpus_per_node=1` the FSDP mesh is size 1. `FULL_SHARD` then does a no-op "sharding" but still emits
+`storage._resize_` free/gather ops every forward — and HPU **lazy** mode can't do that resize (native SIGABRT
+inside `generate`). Use `ShardingStrategy.NO_SHARD` for a size-1 mesh (`verl/workers/fsdp_workers.py
+get_sharding_strategy`). Then the whole thing runs in lazy mode, which is what optimum-habana wants.
+
+### Habana HCCL ReduceOp support
+HCCL implements **SUM/MIN/MAX**, not **AVG/PREMUL_SUM** (`hccl_kernels.cpp:158 getHCCLReduceOp`). FSDP/other code
+may request AVG. On a `world_size==1` group the reduction is the identity, so coerce `AVG/PREMUL_SUM → SUM`
+(`verl/utils/device.py`, guarded by `world_size==1`). **Scope it to verl modules** — do *not* put it in a global
+`usercustomize.py`, because that drags `import torch` into every Ray helper process and breaks raylet startup.
+
+### Ray-in-apptainer metrics-agent deadlock (the recurring startup failure)
+Symptom in `slurm-<JID>.out`: `GCS cannot find the node ... registration may not be complete`, or `node timed out
+during startup`, or `RPC error: Deadline Exceeded`. Root cause (from `logs/raylogs_<JID>/raylet.err`):
+```
+raylet: Timed out waiting for file .../metrics_agent_port_  ->  WaitForDashboardAgentPorts()  -> SIGABRT
+agent : RPC error: Deadline Exceeded (reporter_agent -> raylet)
+```
+Raylet ↔ metrics-agent mutual gRPC deadlock; fires when the agent imports slowly (cold cache / shared FS).
+
+What works / doesn't:
+- ❌ `include_dashboard=False` — raylet waits for the agent regardless.
+- ❌ bumping `RAY_agent_register_timeout_ms` / `RAY_raylet_start_wait_time_s` — raylet still aborts ~113 s in.
+- ✅ **cache-warming retry loop** (`_run_inside_05.sh`): run `main_ppo` up to 4×, `clean_ray()` between attempts
+  (kill `gcs_server`/`raylet`/`dashboard`/`plasma`, wipe `RAY_TMPDIR`); attempt 1 warms the page cache so the agent
+  imports fast on the retry. Only retry on infra signatures; break on real training errors.
+- ✅ **node hygiene**: `--exclude` nodes with a stuck HPU module (`synStatus=8 Device acquire failed / Device not
+  found`) — that's hardware, retries won't fix it. Poisoned-by-my-own-leftovers nodes are recovered by `clean_ray()`.
+
+Next levers if retries are still flaky (in order): drop `_node_ip_address="127.0.0.1"` from `main_ppo.py` ray.init
+(let Ray use the real node IP so agent↔raylet addressing agrees); copy `cpkgs` to node-local `$TMPDIR`/`/dev/shm`
+and point `PYTHONUSERBASE` there so agent imports are fast; or pre-start a head node.
+
+### Always preserve Ray logs on failure
+`run_05.sh` copies `$RAY_TMPDIR/session_latest/logs/{raylet,gcs_server,dashboard*}.*` to `logs/raylogs_<JID>/`
+before cleanup. When a run dies at "GCS cannot find node", the *real* reason is in `raylet.err` /
+`dashboard_agent.log`, not the driver traceback.
+
+### SLURM fairshare on Gaudi (FYI)
+Gaudi (`hl225`) has no per-type billing weight, so it bills at the generic `gres/gpu=3.0` — the cheapest
+accelerator on Sol (A100=25, H100=40). A 1-HPU/16-CPU/96 GB job bills `43/min`, dominated by CPU(16)+mem(24), not
+the GPU(3). Fairshare decays with a 7-day half-life; running on Gaudi barely moves your priority. Check with
+`sshare -U -u <user>`.

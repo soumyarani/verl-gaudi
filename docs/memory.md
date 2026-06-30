@@ -3,99 +3,121 @@
 > If you are Claude (or a human) picking this up: read this top-to-bottom, then `skills.md` for the run recipes.
 > Everything is checkpointed on ASU Sol at **`/scratch/ssamine4/verl_gaudi/`** (SSH host alias `sol`, needs ASU VPN).
 
-Last updated: 2026-06-30.
+Last updated: 2026-06-30 (session 2 — the "fresh-eyes" debugging pass).
 
 ## TL;DR status
-- ✅ verl **installed and verified working on Intel Gaudi 2** (driver SynapseAI 1.24) — Ray + custom `PlatformHPU`
-  backend + **FSDP model sharding on the Gaudi card** + optimizer + reward all run.
-- ✅ Two working container environments built (PyTorch-1.24 and vLLM-1.24).
-- ✅ **Generation ran ~36 s on the Gaudi card** via the `hf` rollout (verl 0.5.0 + optimum-habana).
-- 🧱 **No full GRPO iteration completed.** The rollout/generation step hits HPU walls in *both* architectures.
+- ✅ verl **installed and runs on Intel Gaudi 2** (driver SynapseAI 1.24) — Ray + custom `PlatformHPU`/`device.py`
+  HPU backend + **FSDP model sharding on the Gaudi card** + optimizer + reward all run.
+- ✅ **The documented "lazy/eager catch-22" wall was a MISDIAGNOSIS and is now removed** (see below).
+- ✅ **The real generation blocker (Habana HCCL rejects `ReduceOp.AVG`) is fixed** with a math-equivalent coercion.
+- 🧱 **A full GRPO iteration is still UNPROVEN end-to-end.** The remaining blocker is *infrastructure*: a
+  Ray-in-apptainer **metrics-agent startup deadlock** that kills the job before generation completes. Mitigation
+  (cache-warming retries) is in place; validation pending.
 
-## The two walls (and why)
-1. **vLLM rollout (verl 0.9):** vLLM runs as a *separate process*; it can't acquire the Gaudi module the FSDP actor
-   already holds (`Device acquire failed`, Gaudi modules are exclusive-per-process). vLLM itself launches fine on HPU.
-2. **HF rollout (verl 0.5.0 + optimum-habana):** runs `model.generate()` through the FSDP graph → FSDP
-   `summon_full_params` (`storage._resize_`) needs **eager** mode, but HF-generate view ops need **lazy** → a true
-   catch-22. Both arrows point to the same fix:
+## ⭐ The big reframe (session 2): you probably DON'T need disaggregated vLLM
+The previous `memory.md` said the only way forward was **disaggregated vLLM** (separate HPUs for actor vs. rollout),
+because the HF-rollout path hit a "catch-22" (FSDP `summon_full_params` needs eager; optimum-habana generate needs
+lazy). **That framing was wrong.** Root cause analysis this session showed:
 
-## ➡️ Recommended next step: **disaggregated vLLM-gaudi**
-Give the FSDP **actor** and the vLLM **rollout server** *different* Gaudi modules (e.g. actor on HPU 0, vLLM on
-HPU 1) instead of colocating on one device. Then there is no device-acquire conflict and inference runs on the
-purpose-built engine. Concretely to try:
-- verl supports non-colocated / "standalone server" rollout placement. Investigate
-  `actor_rollout_ref.rollout.nnodes` / replica placement and `n_gpus_per_node`/resource-pool split so the vLLM
-  `ServerAdapter` lands on a *different* `HPU` resource bundle than the actor `WorkerDict`.
-- Start from the working vLLM env (below). The vLLM engine already launches on HPU; only its colocation failed.
-- Sanity-check first with a **standalone** `vllm_gaudi` serve of Qwen2.5-0.5B inside the vLLM container (no verl) to
-  confirm generation works on its own HPU, then wire verl's disaggregated placement.
+1. **The catch-22 was just pointless single-card FSDP.** With `n_gpus_per_node=1` the FSDP mesh has size 1, so
+   `get_sharding_strategy` picked `FULL_SHARD` — which still frees/re-gathers param storage (`storage._resize_`)
+   every forward, and *that* resize is what HPU lazy mode can't do. **Fix: use `NO_SHARD` for a size-1 mesh**
+   (params stay resident, DDP-style, no resize ops). This **cleared the crash** — the run then died on a *new,
+   deeper* error, proving the wall was gone.
+2. **The new, real error: `Unsupported ReduceOp for HCCL process group`** (`hccl_kernels.cpp:158 getHCCLReduceOp`).
+   Some collective uses `ReduceOp.AVG`/`PREMUL_SUM`, which Habana HCCL rejects. On a **world_size==1** group every
+   collective is the identity, so the ReduceOp is mathematically irrelevant. **Fix: coerce `AVG/PREMUL_SUM → SUM`**
+   for single-rank groups (installed in `verl/utils/device.py`, so only verl processes get it — NOT Ray helpers).
 
-Alternative paths: (b) a Habana-validated `optimum-habana + transformers + verl` pin for the HF path; (c) upstream
-fixes to optimum-habana `_sample` / FSDP-on-HPU storage ops.
+**Implication:** the actor can **train and generate on a single card** via the HF rollout. That is strictly simpler
+than disaggregated vLLM and removes the need for it for the "few iterations" goal. Disaggregated vLLM remains the
+right answer for *throughput/scale*, but is not required to prove a working iteration.
+
+## 🧱 The remaining blocker: Ray metrics-agent startup deadlock (the ORIGINAL project blocker)
+Once the code walls fell, the job kept dying at **Ray init**, before/around generation, with:
+```
+raylet  : Timed out waiting for file .../metrics_agent_port_...  -> Check failed -> SIGABRT
+                ray::raylet::NodeManager::WaitForDashboardAgentPorts()
+agent   : RPC error: Deadline Exceeded   (reporter_agent talking to the raylet)
+driver  : GCS cannot find the node ... node registration may not be complete
+```
+**Mechanism:** the raylet's `NodeManager` constructor *blocks* in `WaitForDashboardAgentPorts()` waiting for the
+metrics/dashboard agent to write its port file; the agent meanwhile blocks on a gRPC call to the raylet → mutual
+deadlock. It is **timing-sensitive**: it only triggers when the agent imports slowly (cold page cache, imports off
+the shared `cpkgs` filesystem). That's why the *first* run of a session sometimes succeeds and later ones fail.
+- `include_dashboard=False` (added to `main_ppo.py` ray.init) does **NOT** help — the raylet waits for the agent
+  regardless of the dashboard head.
+- `RAY_agent_register_timeout_ms=300000` and `RAY_raylet_start_wait_time_s=600` are set but the raylet aborts on
+  the agent-port wait at ~113 s anyway.
+
+### Mitigations in place (session 2)
+- **Cache-warming retry loop** in `scripts/_run_inside_05.sh`: runs `main_ppo` up to 4×; on a *transient infra*
+  failure (GCS/agent/Device-acquire signatures) it kills stale Ray (`gcs_server`/`raylet`/`dashboard`/`plasma`),
+  wipes `RAY_TMPDIR`, and retries. The first attempt warms the page cache so the agent imports fast enough to win
+  the race on the retry. Non-infra failures break out immediately (no wasted ~12-min cycles).
+- **Node hygiene**: failed runs can leave a node's Ray/HPU state wedged. `--exclude` known-bad nodes; the retry
+  loop's `clean_ray()` also de-poisons. Some gaudi nodes have a **stuck HPU module** (`synStatus=8 Device acquire
+  failed / Device not found`) — those need `--exclude`, not retry.
+
+### If retries still don't crack it — next things to try (in order)
+1. **Drop `_node_ip_address="127.0.0.1"`** in `main_ppo.py` ray.init and let Ray autodetect the real node IP
+   (`10.139.126.x`). The agent reports the node under its real IP; forcing loopback may widen the addressing
+   mismatch that makes the agent↔raylet gRPC time out.
+2. Put `cpkgs` (the user-site) on **node-local disk** (`/tmp` or `/dev/shm`) before launch so agent imports are
+   fast and the deadlock window closes. Copy `cpkgs` → `$TMPDIR/cpkgs`, set `PYTHONUSERBASE` there.
+3. Pre-launch a head node with `ray start --head --include-dashboard=false` and `ray.init(address=...)` (memory
+   notes this was historically flaky, but worth a second look with the clean-ray hygiene now in place).
+4. Only if all of the above fail: fall back to **disaggregated vLLM** (the old plan).
 
 ## Cluster facts (Sol)
-- Host alias `sol` = `login.sol.rc.asu.edu`, user `ssamine4`. **Needs ASU VPN** (VPN-only DNS; if it stops
-  resolving the VPN dropped — reconnect; cannot be fixed agent-side).
-- `gaudi` partition: 10 nodes, **8× HL-225 (Gaudi2, 92 GB)** each, driver **SynapseAI 1.24**. Rocky 8.10, SLURM.
-- **Use `sbatch`, never interactive `srun`/`salloc`** (interactive job-steps fail on Sol).
-- Run on a **gaudi node** (login node can't import HPU torch — old glibc). Compute nodes have internet.
-- Some gaudi nodes occasionally have a stuck HPU (`Device acquire failed` even for the actor) — `--exclude` them.
+- Host `sol` = `login.sol.rc.asu.edu`, user `ssamine4`. **Needs ASU VPN**. **`sbatch` only** (no interactive
+  `srun`/`salloc`). Run on a **gaudi node** (login node can't import HPU torch — old glibc).
+- `gaudi` partition: 10 nodes, 8× HL-225 (Gaudi2, 92 GB), driver **SynapseAI 1.24**.
+- **SLURM fairshare:** Gaudi is billed at the *generic* `gres/gpu=3.0` weight (no `hl225`-specific weight) — the
+  cheapest accelerator on the cluster (A100=25, H100=40). A 1-HPU/16-CPU/96 GB job bills `43/min`, mostly CPU+mem.
+  FairShare factor was 0.75 (healthy) and decays with a 7-day half-life. Running on Gaudi barely moves it.
 
 ## Workspace layout — `/scratch/ssamine4/verl_gaudi/`
 | Path | What |
 |------|------|
-| `gaudi_124_pt210.sif` | Habana 1.24 **PyTorch** container (torch 2.10) — used for the HF-rollout / FSDP path |
-| `gaudi_124_vllm.sif` | Habana 1.24 **vLLM** container (torch 2.7.1, **vllm 0.9.1 + vllm_gaudi 0.21**) — the disaggregation path |
-| `verl/` | verl **0.9.0.dev0** clone (vLLM path) — patched; has `verl/plugin/platform/platform_hpu.py` |
-| `verl05/` | verl **0.5.0** clone (HF-rollout path) — patched; **the path that generated tokens** |
-| `cpkgs/` | writable user-site for the PyTorch container (`PYTHONUSERBASE`): verl deps, ray 2.55.1, **transformers 4.49 + optimum-habana 1.18** |
-| `cpkgs_vllm/` | writable user-site for the vLLM container: verl deps, ray 2.47.1 (patched) |
-| `models/Qwen2.5-0.5B-Instruct/` | the policy model |
-| `data/gsm8k/{train,test}.parquet` | GSM8k preprocessed |
-| `scripts/` | versioned run/setup scripts (`run_05.sh`, `_run_inside_05.sh`, `run_vllm.sh`, `setup_*`, ...) |
-| `logs/` | all job logs (`run_05*.log` = HF path, `run_vllm*.log` = vLLM path) |
-| `cconstraints.txt`, `cv_constraints.txt` | pip constraints pinning the HPU torch/numpy so deps can't clobber it |
+| `gaudi_124_pt210.sif` | Habana 1.24 **PyTorch** container (torch 2.10) — the HF-rollout / FSDP path |
+| `gaudi_124_vllm.sif` | Habana 1.24 **vLLM** container (vllm 0.9.1 + vllm_gaudi) — disaggregation path (unused now) |
+| `verl05/` | verl **0.5.0** clone — patched; **the active path** (HF rollout). `git diff` here == `patches/verl05.diff` |
+| `verl/` | verl **0.9.0.dev0** clone (vLLM path) — patched; has `platform_hpu.py` |
+| `cpkgs/` | user-site for the PT container (`PYTHONUSERBASE`): verl deps, ray 2.55.1, transformers 4.49 + optimum-habana 1.18 |
+| `models/Qwen2.5-0.5B-Instruct/`, `data/gsm8k/{train,test}.parquet` | model + data |
+| `scripts/` | `run_05.sh` (sbatch wrapper, captures raylet logs on fail), `_run_inside_05.sh` (retry loop) |
+| `logs/` | job logs (`slurm-<JID>.out`); `logs/raylogs_<JID>/` = captured raylet/gcs/agent logs on a failed run |
 
-## What's where in *this repo* (mirror of the changes)
-- `patches/verl05.diff` — all verl-0.5.0 source changes (the running path).
-- `patches/verl09_main.diff` — all verl-0.9 source changes (vLLM path; includes platform plugin registration).
-- `patches/platform_hpu.py` — the new `PlatformHPU` backend (verl 0.9).
-- `patches/env/patch_*.py` — patches to *installed libraries* (Ray `ray_option_utils`, optimum-habana `_sample`,
-  `enum.StrEnum` shim) that live outside verl's git tree. Re-apply after reinstalling those libs.
-- `scripts/` — the exact sbatch wrappers + inside-scripts to reproduce both paths.
+## Run it
+```bash
+ssh sol   # ASU VPN up
+cd /scratch/ssamine4/verl_gaudi
+sbatch scripts/run_05.sh           # HF rollout, NO_SHARD + ReduceOp coercion + Ray retry loop
+# watch: tail -f slurm-<JID>.out ; success markers = "After FSDP", "Training Progress", "actor/pg_loss"
+```
 
-## The two "magic" run commands (full detail in skills.md)
-- HF path (generated tokens): `sbatch scripts/run_05.sh` → `_run_inside_05.sh` (verl05 + `rollout.name=hf` +
-  optimum-habana, eager mode, `cpkgs`).
-- vLLM path (engine launches): `sbatch scripts/run_vllm.sh` → `_run_inside_vllm.sh` (verl + `rollout.name=vllm` +
-  `cpkgs_vllm`).
-
-## ~20 patches, one-line each (ordered) — see `03-debugging-journey.md` for the *why*
-1. `device.py`/`platform_hpu.py`: register `hpu` (device, `hccl`, `HABANA_VISIBLE_MODULES`).
-2. `base.py`: HPU placement-group bundle + `{"resources":{"HPU":n}}` actor option.
-3. `ray_trainer.py`: count `HPU` in `_check_resource_available`.
-4. `main_ppo.py` (v0.5): `ray.init(resources={"HPU":8}, num_gpus=0, _node_ip_address=...)`.
-5. Ray `ray_option_utils.py`: allow **fractional HPU**.
-6. FSDP `EngineRegistry`: add `hpu` to FSDP engine (v0.9).
-7. attn `flash_attention_2 -> sdpa` (3 sites).
-8. FSDP **pre-move** `module.to('hpu')` before `FSDP(...)`.
-9. `torch.hpu.empty_cache` no-op shim.
-10. `enum.StrEnum` shim (py3.10) for vLLM image.
-11. `RAY_agent_register_timeout_ms=300000` + explicit `HPU:8` resource (run-env).
-12. `trainer.use_v1=False` (classic trainer, avoids `transfer_queue`).
-13. HFRollout `num_return_sequences=1` (double-`n` fix).
-14. `rollout.tensor_model_parallel_size=1`.
-15. `adapt_transformers_to_gaudi()` wired into `device.py` (HF path) + `transformers==4.49`/`optimum-habana==1.18`.
-16. `wrap_policy.transformer_layer_cls_to_wrap=[GaudiQwen2DecoderLayer]` (list!).
-17. HFRollout: drop bf16 autocast; move inputs to HPU; pass `lazy_mode=True`.
-18. HFRollout: skip `summon_full_params` on HPU (the lazy-mode attempt).
-19. optimum-habana `_sample`: eos tensor `.to(input_ids.device)`.
-20. optimum-habana `_sample`: guard empty eos-search slice; no-op `check_synapse_version`.
+## The patches that matter now (session-2 additions in **bold**)
+1. `device.py`/`platform_hpu.py`: register `hpu` (device, `hccl`, `HABANA_VISIBLE_MODULES`, empty_cache shim,
+   optimum-habana adapt).
+2. **`fsdp_workers.py` `get_sharding_strategy`: return `NO_SHARD` when mesh size==1** (kills the resize crash).
+3. **`device.py`: coerce `ReduceOp.AVG/PREMUL_SUM → SUM` on world_size==1 groups** (HCCL compat).
+4. **`main_ppo.py` ray.init: `include_dashboard=False`** (minor; doesn't fix the agent deadlock by itself).
+5. **`_run_inside_05.sh`: cache-warming Ray retry loop**; **`run_05.sh`: `RAY_raylet_start_wait_time_s=600`,
+   raylet-log capture on failure, exclude stuck-module nodes.**
+6. base.py HPU resource + ray_trainer.py HPU count + main_ppo `ray.init(resources={HPU:8})`; ray_option_utils
+   fractional HPU; attn `flash_attention_2→sdpa`; FSDP pre-move to HPU; HFRollout `num_return_sequences=1`,
+   inputs→HPU, drop bf16 autocast, skip summon on HPU; `transformer_layer_cls_to_wrap=[GaudiQwen2DecoderLayer]`;
+   optimum-habana `_sample` eos-device + empty-slice guards; `trainer.use_v1=False`.
 
 ## Honest bottom line
-> verl is installed and runs on Gaudi through the entire training pipeline up to and including generation — but the
-> rollout/generation step hits HPU-specific op-compatibility walls in both available architectures (vLLM
-> colocation; HF-generate+FSDP+optimum-habana). Completing a full iteration needs one of: **disaggregated vLLM**
-> (dedicate separate HPUs to actor vs. rollout), a Habana-validated optimum-habana/transformers/verl pin for this
-> exact path, or upstream fixes. All ~20 patches and both environments are checkpointed on
-> `/scratch/ssamine4/verl_gaudi/`.
+> verl runs on Gaudi through the entire training pipeline. This session **dismantled the two "walls"** that the
+> previous notes treated as fundamental: the HF-rollout "lazy/eager catch-22" was just pointless single-card FSDP
+> sharding (fixed with `NO_SHARD`), and the generation crash underneath it was Habana HCCL rejecting `ReduceOp.AVG`
+> (fixed with a math-equivalent `AVG→SUM` coercion for single-rank groups). **As a result, disaggregated vLLM is no
+> longer required** to prove a few GRPO iterations — the actor can train and generate on one card. A full iteration
+> is **not yet validated end-to-end**, because the job now dies on the *original* project blocker: a Ray-in-apptainer
+> metrics-agent startup deadlock (`WaitForDashboardAgentPorts` ↔ agent gRPC). A cache-warming retry loop is in place
+> to ride past its timing-sensitive window; if that proves insufficient, the next levers are dropping the loopback
+> `_node_ip_address` override and staging `cpkgs` on node-local disk. All patches and both environments are
+> checkpointed on `/scratch/ssamine4/verl_gaudi/`.
