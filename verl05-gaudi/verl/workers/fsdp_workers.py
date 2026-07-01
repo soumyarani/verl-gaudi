@@ -377,6 +377,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+        if get_device_name() == "hpu":
+            # HPU: CPUOffload conflicts with the pre-move-to-HPU below (set_data CPU/HPU
+            # mismatch). The 0.5B ref model fits on-card, so keep it resident.
+            cpu_offload = None
         fsdp_strategy = self.config.actor.strategy
         if fsdp_strategy == "fsdp":
             if get_device_name() == "hpu":

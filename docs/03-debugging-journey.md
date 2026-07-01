@@ -193,3 +193,21 @@ Once Ray + device-acquire + generation worked (Phase 7), two more fell:
 5. **`mixed_precision=None` on HPU** — kills the `_mp_shard` resize crash (log-prob/training forward).
 6. (+ all Phase 0–6 patches: HPU platform/device registration, Ray HPU resource, attn→sdpa, FSDP pre-move,
    optimum-habana adapt + `_sample` fixes, etc.)
+
+---
+
+## Phase 9 — KL/reference-model path gaps (surfaced by full-settings benchmarking)
+
+The matched-config runs used no KL, so the **reference model** was never built on Gaudi. Turning on
+`use_kl_loss=True` (verl's full GRPO settings) exercised it for the first time and surfaced four more port gaps —
+all now fixed and in `patches/verl05.diff`:
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Could not find the transformer layer class to wrap` (ref) | FSDP wrap-policy auto-detect looks for `Qwen2DecoderLayer`, but optimum-habana renamed it | pass `+actor_rollout_ref.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[GaudiQwen2DecoderLayer]` |
+| `set_data ... incompatible tensor type` (ref) | ref FSDP hardcodes `CPUOffload`, which conflicts with the HPU pre-move | `cpu_offload=None` on HPU in `fsdp_workers.py` (0.5B ref fits on-card) |
+| `FATAL ... PT_DEVMEM Allocation failed 46 GB` (generation) | HF rollout has **no batched generation** — tries to materialize all 5,120 sequences at once | `+actor_rollout_ref.rollout.micro_batch_size=64` (chunk generation) |
+| generation then runs but **>38 min/step, never finishes** | HF rollout is serial (80 chunks × 1024 tok, graph recompile per shape) | **architectural** — needs `vllm-gaudi`, not a patch. See [`BENCHMARK.md`](BENCHMARK.md). |
+
+The last row is the punchline of the whole benchmark: the HF rollout is not viable for real settings on Gaudi. The
+fix is a proper inference engine — **vllm-gaudi** — which is the next line of work.
