@@ -69,3 +69,21 @@ colocated NO_SHARD fix (Step 2) isn't enough.
 ```bash
 sbatch vllm-gaudi-scripts/vllm_gaudi_smoke.sh   # exclusive Gaudi node; prints VLLM_GAUDI_SMOKE_OK on success
 ```
+
+
+### Step 3 — current blocker (as of last run): v1 trainer hangs at init on HPU
+Two long runs (55 min, then 2.5 h) both hit the SLURM time limit with the **same signature**: after
+`TaskRunnerV1 ... Platform override from VERL_PLATFORM: hpu` and a `verl/workers/engine/mindspeed/transformer_impl.py`
+NPU-router-replay warning, there is **zero further output** until the job is killed. So the v1 disaggregated trainer
+**deadlocks at init**, before creating any resource pool, the standalone vLLM server, or FSDP.
+
+Suspects (v1-init, in order): (1) **TransferQueue** controller/server startup (Ray-based) deadlocking on HPU — this
+is the v1 data plane and is brand-new here; (2) the v1 trainer importing the **mindspeed/megatron NPU** path and
+stalling; (3) another Ray-in-container startup deadlock like the metrics-agent one on `main` (but `Started a local
+Ray instance` did print, so ray.init itself completed).
+
+**Concrete next diagnostic (do this before any more long runs):** resubmit with a short (~15 min) limit and, from
+the batch script, after ~4 min `py-spy dump --pid <TaskRunnerV1 pid>` (install `py-spy` in `cpkgs_vllm`) to capture
+the exact Python frame it is stuck on. That single stack trace tells you whether it's TransferQueue, mindspeed, or
+Ray — and turns this from a blind multi-hour loop into a targeted fix. Also resolve the `tensordict` tension
+(TransferQueue 0.1.8 pulled 0.13; verl wants <=0.10) since a silent version mismatch could itself hang.
