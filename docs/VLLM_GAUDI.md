@@ -42,7 +42,7 @@ Two ways out, in order of effort:
       `This function should not be called in lazy flow` — the FSDP gather during weight sync, the same
       resize issue NO_SHARD fixes. Applied **NO_SHARD + mixed_precision=None to verl 0.9** (`patches/verl09_main.diff`,
       `engine/fsdp/utils.py` + `transformer_impl.py`) and re-testing.
-- [~] **Step 3 — disaggregated placement (`separate_async`)** — IN PROGRESS, config valid, v1 trainer runs.
+- [~] **Step 3 — disaggregated placement (`separate_async`)** — MAJOR PROGRESS: hang fixed (num_cpus), reaches actor FSDP; blocked at the weight-sync communicator (Habana stateless HCCL missing). See below.
       Applied: `replica.py` `device_name=get_device_name()` (HPU fix); config
       `trainer.use_v1=True trainer.v1.trainer_mode=separate_async`, `rollout.mode=async`,
       `rollout.nnodes=1 rollout.n_gpus_per_node=1`, `rollout.checkpoint_engine.backend=hccl`,
@@ -113,3 +113,28 @@ the later FSDP/vLLM pools drawn from the same cap) fit. `_run_inside_vllm_disagg
 `ray_kwargs.ray_init.num_cpus=8 → 64`, and bump SLURM `-c 16 → 96` so the cgroup allows it (node is `--exclusive`,
 152 cores). Fallbacks if it still hangs: shrink the PG via `+...SimpleStorage.num_data_storage_units=1`; then check
 for a leaked/stale Ray session (kill gcs_server/raylet, wipe the ray tmp) before re-running.
+
+
+### Step 3 — num_cpus fix CONFIRMED WORKING; next blocker = disaggregated weight-sync communicator
+The `num_cpus=64` fix cleared the `tq.init` hang **completely** — the run advanced through TransferQueue init,
+the resource pools, and built the **actor FSDP on HPU** (`After FSDP, memory allocated 3.69 GB`). Diagnosis
+confirmed. It then died on a clean new error: `ValueError: Checkpoint engine hccl not registered`.
+
+**Next blocker (characterised, not yet fixed):** the disaggregated weight transfer (train actor HPU → vLLM rollout
+HPU) has no Habana implementation:
+- verl's HCCL checkpoint engine (`verl/checkpoint_engine/hccl_checkpoint_engine.py`) registers under the name
+  **`nccl`** but is **gated to Ascend NPU**: `if not is_torch_npu_available(): raise ImportError` (line 30). On
+  Gaudi `is_torch_npu_available()` is False, so it never loads → `hccl`/`nccl` resolve to the CUDA NCCL engine.
+- Even if the guard is relaxed and its `torch.npu.*` calls are routed through verl's device facade
+  (`get_torch_device()`), the deeper gap is the **stateless communicator**: `stateless_init_process_group`
+  (`verl/utils/distributed.py:99`) imports `vllm_ascend`'s `PyHcclCommunicator` on NPU, else the CUDA
+  `PyNcclCommunicator`. **`vllm_gaudi` provides only an in-engine `HpuCommunicator` (DeviceCommunicatorBase), not a
+  stateless PyHccl** for cross-job weight sync. So a Habana stateless-HCCL communicator must be written (or the
+  engine re-implemented on plain `torch.distributed` with the `hccl` backend + a TCPStore rendezvous).
+
+This is a real implementation task, not a config fix — it's the last mile of disaggregated vLLM on Gaudi and a
+natural upstream contribution (making verl's HCCL checkpoint engine + stateless communicator work on Habana HPU,
+not just Ascend NPU). Concrete sub-steps: (1) relax the HCCL-engine import guard to `npu OR hpu`; (2) route its
+`torch.npu.*` device calls through `get_torch_device()`/`get_device_name()`; (3) provide a Habana stateless HCCL
+communicator for `stateless_init_process_group` (wrap habana hccl like `vllm_ascend`'s PyHccl, or use
+`torch.distributed` + `hccl` over a TCPStore).
