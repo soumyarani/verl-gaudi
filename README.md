@@ -27,6 +27,7 @@ verl-gaudi/
 │   ├── 01-verl-pipeline.md   ← 3b1b-style: how verl/GRPO works, first principles
 │   ├── 02-gaudi-port.md      ← every Gaudi change mapped to its backend concept (C1–C7)
 │   ├── 03-debugging-journey.md ← blow-by-blow: every error, fix, and lesson (ctrl-F your error)
+│   ├── BENCHMARK.md          ← Gaudi-2 vs A100 timing/perf (matched + full verl settings)
 │   ├── memory.md             ← exact project state, checkpoints, next steps
 │   └── skills.md             ← the operational playbook (run recipes + cluster gotchas)
 ├── patches/
