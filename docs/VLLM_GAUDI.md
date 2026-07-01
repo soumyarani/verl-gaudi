@@ -36,11 +36,25 @@ Two ways out, in order of effort:
       init 27.8 s, **generate 2.84 s / 2 prompts, correct output** ("2+2 is equal to 4", "capital of France is Paris").
       Proves the engine works standalone -> the earlier failure was *only* colocation, not the engine. See
       `vllm-gaudi-scripts/vllm_gaudi_smoke_OK.txt`.
-- [ ] **Step 2 — vLLM rollout in verl, single card** (colocated): expect the device-acquire wall; confirm it's the
-      process-exclusivity issue, not an engine issue.
+- [~] **Step 2 — vLLM rollout in verl (verl 0.9), single card.** **Surprise: the device-acquire wall is GONE.**
+      verl 0.9's rollout is a `vLLMHttpServer` (separate Ray actor) that gets its own HPU, so it reached
+      **weight sync** (`After FSDP, 3.69 GB on HPU` -> `actor_rollout_update_weights`). New blocker there:
+      `This function should not be called in lazy flow` — the FSDP gather during weight sync, the same
+      resize issue NO_SHARD fixes. Applied **NO_SHARD + mixed_precision=None to verl 0.9** (`patches/verl09_main.diff`,
+      `engine/fsdp/utils.py` + `transformer_impl.py`) and re-testing.
 - [ ] **Step 3 — disaggregated placement**: put the vLLM rollout server on a *separate* HPU resource bundle from
       the actor `WorkerDict` (verl non-colocated / standalone-server rollout; resource-pool split). The real fix.
 - [ ] **Step 4 — full GRPO iteration with vLLM rollout on Gaudi**, then benchmark vs HF-rollout and A100.
+
+## verl 0.9 supports disaggregated rollout natively (research finding)
+
+`trainer.use_v1=True` + `trainer.v1.trainer_mode=separate_async` builds a **standalone vLLM server in its own Ray
+resource pool on separate devices** from the actor (`workers/rollout/replica.py:189 init_standalone`), syncing
+weights over `rollout.checkpoint_engine.backend` (**`hccl`** is supported = Gaudi). Config: `rollout.mode=async`,
+`rollout.nnodes=1`, `rollout.n_gpus_per_node=<sep pool>`, `train_batch_size==ppo_mini_batch_size`. **One HPU code
+gap:** `replica.py:184,223` hardcodes `device_name="cuda"/"npu"` — needs an `hpu` branch so the standalone worker
+group passes the platform check in `single_controller/ray/base.py`. This is Path B (true disaggregation) if the
+colocated NO_SHARD fix (Step 2) isn't enough.
 
 ## Reproduce step 1
 ```bash

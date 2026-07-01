@@ -261,10 +261,21 @@ index 2eab936..980473c 100644
              self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
          )
 diff --git a/verl/workers/engine/fsdp/transformer_impl.py b/verl/workers/engine/fsdp/transformer_impl.py
-index bc01062..f44d4a3 100644
+index bc01062..f270e8e 100644
 --- a/verl/workers/engine/fsdp/transformer_impl.py
 +++ b/verl/workers/engine/fsdp/transformer_impl.py
-@@ -582,6 +582,10 @@ class FSDPEngine(BaseEngine):
+@@ -375,6 +375,10 @@ class FSDPEngine(BaseEngine):
+             buffer_dtype = torch.float32
+ 
+         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
++        if device_name == "hpu":
++            # HPU lazy mode: FSDP MixedPrecision frees the _mp_shard via storage._resize_(0),
++            # unsupported in lazy flow. Disable MP (params stay in their loaded dtype).
++            mixed_precision = None
+ 
+         self._autocast_dtype = param_dtype
+         # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
+@@ -582,6 +586,10 @@ class FSDPEngine(BaseEngine):
  
          # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
          log_gpu_memory_usage("Before FSDP", logger=None)
@@ -275,7 +286,7 @@ index bc01062..f44d4a3 100644
          module = self._build_fsdp_module(module)
          log_gpu_memory_usage("After FSDP", logger=None)
  
-@@ -942,7 +946,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
+@@ -942,7 +950,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
          super().__exit__(exc_type, exc_value, traceback)
  
  
@@ -284,7 +295,7 @@ index bc01062..f44d4a3 100644
  class FSDPEngineWithLMHead(FSDPEngine):
      def prepare_model_inputs(self, micro_batch: TensorDict):
          use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
-@@ -1348,7 +1352,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
+@@ -1348,7 +1356,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
              return loss, output
  
  
@@ -293,3 +304,20 @@ index bc01062..f44d4a3 100644
  class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
      """
      The only difference between critic and actor is how the raw model output is processed
+diff --git a/verl/workers/engine/fsdp/utils.py b/verl/workers/engine/fsdp/utils.py
+index 4ddde00..4ccf005 100644
+--- a/verl/workers/engine/fsdp/utils.py
++++ b/verl/workers/engine/fsdp/utils.py
+@@ -76,7 +76,11 @@ def get_sharding_strategy(device_mesh, zero3_enable=True):
+         fsdp_strategy = ShardingStrategy.SHARD_GRAD_OP
+         hsdp_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
+ 
+-    if device_mesh.ndim == 1:
++    if device_mesh.size() == 1:
++        # HPU/single-device: sharding is a no-op and FULL_SHARD's storage._resize_
++        # (free/gather) is unsupported in Habana lazy mode. NO_SHARD keeps params resident.
++        sharding_strategy = ShardingStrategy.NO_SHARD
++    elif device_mesh.ndim == 1:
+         sharding_strategy = ShardingStrategy.FULL_SHARD
+         sharding_strategy = fsdp_strategy
+     elif device_mesh.ndim == 2:
