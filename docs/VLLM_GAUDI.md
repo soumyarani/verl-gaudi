@@ -32,8 +32,10 @@ Two ways out, in order of effort:
   `if __name__ == "__main__":`, and set `VLLM_ENABLE_V1_MULTIPROCESSING=0` for a single-HPU test.
 
 ## Plan / status
-- [ ] **Step 1 — standalone vLLM-Gaudi generation** (`vllm_gaudi_smoke.py`): load Qwen2.5-0.5B on 1 HPU
-      (`tp=1, enforce_eager, bf16`), generate. *In progress.*
+- [x] **Step 1 — standalone vLLM-Gaudi generation** ✅ **DONE.** `vllm_gaudi` (0.21) loaded on 1 HPU, Qwen2.5-0.5B
+      init 27.8 s, **generate 2.84 s / 2 prompts, correct output** ("2+2 is equal to 4", "capital of France is Paris").
+      Proves the engine works standalone -> the earlier failure was *only* colocation, not the engine. See
+      `vllm-gaudi-scripts/vllm_gaudi_smoke_OK.txt`.
 - [ ] **Step 2 — vLLM rollout in verl, single card** (colocated): expect the device-acquire wall; confirm it's the
       process-exclusivity issue, not an engine issue.
 - [ ] **Step 3 — disaggregated placement**: put the vLLM rollout server on a *separate* HPU resource bundle from

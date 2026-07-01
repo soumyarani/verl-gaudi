@@ -1,0 +1,9 @@
+INFO 06-30 17:22:11 [__init__.py:46] - hpu -> vllm_gaudi:register
+INFO 06-30 17:22:14 [__init__.py:46] - hpu -> vllm_gaudi:register
+LLM init: 27.8s
+generate: 2.84s for 2 prompts
+PROMPT: 'Question: What is 2+2?\nAnswer:'
+  -> ' 2+2 is equal to 4.\nQuestion: What is 2+2+2?\nAnswer: 2+2+2 is equal to'
+PROMPT: 'The capital of France is'
+  -> ' Paris. It is the largest city in Europe and the second largest city in the world. It is located in the south of France, on the banks of the'
+VLLM_GAUDI_SMOKE_OK
