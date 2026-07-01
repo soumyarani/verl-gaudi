@@ -1,0 +1,46 @@
+# vllm-gaudi branch — enabling the vLLM rollout on Gaudi
+
+> **Why this branch exists.** The [benchmark](BENCHMARK.md) proved the point: verl's **HF rollout** is not viable
+> for real settings on Gaudi (one full-settings step's generation ran **>38 min and never finished**, because HF
+> `model.generate` is serial with no paged/batched KV cache). A100 does the same step in ~110 s *only because it
+> uses vLLM*. So the single highest-value fix for Gaudi is to make verl's **vLLM rollout** work on HPU.
+>
+> This branch tracks that work, isolated from `main` (which holds the working HF-rollout port + benchmarks).
+
+## The core problem (from earlier attempts, documented on `main`)
+verl colocates the FSDP **actor** and the **rollout** on the same accelerator ("hybrid engine"). On CUDA that's
+free (one process, multiple contexts). On Gaudi, **modules are exclusive-per-process** — the vLLM rollout runs as a
+*separate* process and can't acquire the module the FSDP actor already holds -> `synStatus=8 Device acquire failed`.
+
+Two ways out, in order of effort:
+1. **Standalone validation first (this step).** Confirm `vllm_gaudi` can load Qwen2.5-0.5B and generate on *one*
+   HPU with no verl/Ray in the picture. If the engine itself works, the integration is "just" placement.
+2. **Disaggregated placement.** Give the actor and the vLLM rollout **different** HPU modules (actor on module 0,
+   vLLM on module 1) instead of colocating. Then there is no device-acquire conflict. This is the real target.
+
+## Assets (on Sol, `/scratch/ssamine4/verl_gaudi/`)
+- `gaudi_124_vllm.sif` — Habana 1.24 container with **`vllm` + `vllm_gaudi` (0.21)**.
+- `cpkgs_vllm/` — writable user-site for that container (verl deps, patched Ray).
+- `verl/` — verl **0.9.0.dev0** clone with `platform_hpu.py` + the vLLM-path patches.
+- `vllm-gaudi-scripts/` (this repo) — `vllm_gaudi_smoke.{py,sh}` (standalone test), `run_vllm.sh` /
+  `_run_inside_vllm.sh` (verl+vLLM path), `setup_vllm.sh`.
+
+## Container gotchas already found (standalone step)
+- vLLM writes its compile cache to `~/.cache/vllm`; under `--no-home` that is read-only -> set
+  `XDG_CACHE_HOME` / `VLLM_CACHE_ROOT` / `HOME` to a writable scratch dir.
+- The V1 engine spawns an `EngineCore` subprocess that re-imports the entry script -> guard the body with
+  `if __name__ == "__main__":`, and set `VLLM_ENABLE_V1_MULTIPROCESSING=0` for a single-HPU test.
+
+## Plan / status
+- [ ] **Step 1 — standalone vLLM-Gaudi generation** (`vllm_gaudi_smoke.py`): load Qwen2.5-0.5B on 1 HPU
+      (`tp=1, enforce_eager, bf16`), generate. *In progress.*
+- [ ] **Step 2 — vLLM rollout in verl, single card** (colocated): expect the device-acquire wall; confirm it's the
+      process-exclusivity issue, not an engine issue.
+- [ ] **Step 3 — disaggregated placement**: put the vLLM rollout server on a *separate* HPU resource bundle from
+      the actor `WorkerDict` (verl non-colocated / standalone-server rollout; resource-pool split). The real fix.
+- [ ] **Step 4 — full GRPO iteration with vLLM rollout on Gaudi**, then benchmark vs HF-rollout and A100.
+
+## Reproduce step 1
+```bash
+sbatch vllm-gaudi-scripts/vllm_gaudi_smoke.sh   # exclusive Gaudi node; prints VLLM_GAUDI_SMOKE_OK on success
+```
