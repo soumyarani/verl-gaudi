@@ -24,7 +24,7 @@ python3.10 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
   actor_rollout_ref.rollout.dtype=bfloat16 \
   actor_rollout_ref.rollout.enforce_eager=True \
-  actor_rollout_ref.rollout.checkpoint_engine.backend=hccl \
+  actor_rollout_ref.rollout.checkpoint_engine.backend=hccl actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module=verl.plugin.checkpoint_engine.hccl_hpu actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=128 \
   actor_rollout_ref.rollout.n=4 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
