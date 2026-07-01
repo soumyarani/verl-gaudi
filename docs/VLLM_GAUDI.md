@@ -87,3 +87,29 @@ the batch script, after ~4 min `py-spy dump --pid <TaskRunnerV1 pid>` (install `
 the exact Python frame it is stuck on. That single stack trace tells you whether it's TransferQueue, mindspeed, or
 Ray — and turns this from a blind multi-hour loop into a targeted fix. Also resolve the `tensordict` tension
 (TransferQueue 0.1.8 pulled 0.13; verl wants <=0.10) since a silent version mismatch could itself hang.
+
+
+### Step 3 — ROOT CAUSE FOUND (py-spy) + fix
+A py-spy dump of the hung `ray::TaskRunnerV1` gave the exact frame:
+```
+ray.get()  <- blocks forever
+get_placement_group        (transfer_queue/utils/common.py:43)
+initialize_simple_storage  (transfer_queue/storage/bootstrap/simple_storage_bootstrap.py:37)
+_maybe_create_tq_storage   (transfer_queue/interface.py:75)
+init                       (transfer_queue/interface.py:191)
+run                        (verl/trainer/main_ppo.py:143)
+```
+TransferQueue's `SimpleStorage` init builds a Ray **placement group** and `ray.get(pg.ready())` never
+returns. The `TransferQueueController` actor itself is healthy (idle on a zmq poll).
+
+**Why it hangs (verified):** verl overrides `transfer_queue...SimpleStorage.num_data_storage_units` to **8**
+(`ppo_trainer.yaml:391`, vs the TransferQueue package default of 2). So the storage PG requests **8 × {CPU:1}**.
+Our launch capped Ray at `ray_init.num_cpus=8`, and at `tq.init` (which runs *before* any FSDP/vLLM pool) the
+`TaskRunnerV1` (1 CPU) + `TransferQueueController` (1 CPU) already hold 2 → only **6 free < 8 requested** → the PG
+pends forever → `pg.ready()` blocks.
+
+**Fix (config-only, chosen via a 5-way workflow, confidence 0.8):** raise the Ray CPU cap so the storage PG (and
+the later FSDP/vLLM pools drawn from the same cap) fit. `_run_inside_vllm_disagg.sh`:
+`ray_kwargs.ray_init.num_cpus=8 → 64`, and bump SLURM `-c 16 → 96` so the cgroup allows it (node is `--exclusive`,
+152 cores). Fallbacks if it still hangs: shrink the PG via `+...SimpleStorage.num_data_storage_units=1`; then check
+for a leaked/stale Ray session (kill gcs_server/raylet, wipe the ray tmp) before re-running.

@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -p gaudi
 #SBATCH -G 1
-#SBATCH -c 96
+#SBATCH -c 16
 #SBATCH --mem=96G
-#SBATCH -t 1:10:00
-#SBATCH -J vllm_disagg
+#SBATCH -t 0:30:00
+#SBATCH -J disagg_diag
 #SBATCH --exclude=gaudi005,gaudi008
 #SBATCH --exclusive
 set -uo pipefail
@@ -24,6 +24,6 @@ apptainer exec --cleanenv --no-home --bind /scratch:/scratch --bind /tmp:/tmp \
   --env VERL_PLATFORM=hpu --env TMPDIR=$RAYTMP --env RAY_TMPDIR=$RAYTMP \
   --env RAY_agent_register_timeout_ms=300000 --env RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0 \
   --env PATH=$WS/cpkgs_vllm/bin:/usr/local/bin:/usr/bin:/bin \
-  "$SIF" bash $WS/scripts/_run_inside_vllm_disagg.sh
+  "$SIF" bash $WS/scripts/_diag_disagg_inside.sh
 rm -rf $RAYTMP
-echo "=== DONE vllm_disagg ==="
+echo "=== DONE disagg_diag ==="

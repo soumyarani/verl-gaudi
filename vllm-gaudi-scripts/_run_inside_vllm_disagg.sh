@@ -29,7 +29,7 @@ python3.10 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
   algorithm.use_kl_in_reward=False \
-  ray_kwargs.ray_init.num_cpus=8 \
+  ray_kwargs.ray_init.num_cpus=64 \
   +ray_kwargs.ray_init.num_gpus=0 \
   '+ray_kwargs.ray_init.resources={HPU:8}' \
   +ray_kwargs.ray_init._node_ip_address=127.0.0.1 \
