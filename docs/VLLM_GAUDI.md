@@ -42,8 +42,17 @@ Two ways out, in order of effort:
       `This function should not be called in lazy flow` — the FSDP gather during weight sync, the same
       resize issue NO_SHARD fixes. Applied **NO_SHARD + mixed_precision=None to verl 0.9** (`patches/verl09_main.diff`,
       `engine/fsdp/utils.py` + `transformer_impl.py`) and re-testing.
-- [ ] **Step 3 — disaggregated placement**: put the vLLM rollout server on a *separate* HPU resource bundle from
-      the actor `WorkerDict` (verl non-colocated / standalone-server rollout; resource-pool split). The real fix.
+- [~] **Step 3 — disaggregated placement (`separate_async`)** — IN PROGRESS, config valid, v1 trainer runs.
+      Applied: `replica.py` `device_name=get_device_name()` (HPU fix); config
+      `trainer.use_v1=True trainer.v1.trainer_mode=separate_async`, `rollout.mode=async`,
+      `rollout.nnodes=1 rollout.n_gpus_per_node=1`, `rollout.checkpoint_engine.backend=hccl`,
+      `ppo_mini_batch_size==train_batch_size`; installed `TransferQueue==0.1.8` (v1 dep, PyPI; note it bumps
+      tensordict to 0.13 vs verl's <=0.10 — watch for conflicts). Result: **`[validate_config] passed` and
+      `TaskRunnerV1` starts** — the disaggregated trainer is live — but v1 setup (transfer_queue + standalone
+      rollout pool + vLLM on the 2nd HPU + hccl weight sync) did not finish within 55 min; relaunched with a 2.5 h
+      limit to see slow-vs-stuck. Scripts: `vllm-gaudi-scripts/run_vllm_disagg.sh`, `_run_inside_vllm_disagg.sh`.
+      Remaining unknowns on HPU: transfer_queue init, the standalone vLLM pool acquiring a 2nd module, and the
+      hccl weight transfer between the two pools.
 - [ ] **Step 4 — full GRPO iteration with vLLM rollout on Gaudi**, then benchmark vs HF-rollout and A100.
 
 ## verl 0.9 supports disaggregated rollout natively (research finding)
