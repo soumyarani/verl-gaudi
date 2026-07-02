@@ -188,3 +188,17 @@ weight-update path. Candidate next directions: (a) check whether the vLLM-Gaudi 
 `trainer_mode=colocate_async` instead of `separate_async`; (b) file/adapt against vllm_gaudi for HPU shared-memory
 weight loading; (c) implement the shm read in a vllm_gaudi worker method. This is upstream-contribution territory,
 not a quick fix.
+
+
+### Step 3 — fallback confirmed: colocate_async hits the SAME layer-4 wall
+Tried `trainer.v1.trainer_mode=colocate_async` (the workflow's fallback). It reached the identical weight-sync
+region (vLLM server up, actor `full_state_dict`) and stalled to the time limit — same as `separate_async`. Confirmed:
+both v1 async modes share the `update_weights_from_ipc` + shared-memory path into the vLLM engine, so a trainer-mode
+config change cannot route around the missing engine-side method. The blocker is squarely in vllm_gaudi / the
+vLLM-v1 async engine's weight-update path.
+
+**Final status of the vllm-gaudi branch:** every tractable verl-side / plugin-side fix is applied and works;
+disaggregated vLLM rollout on Gaudi runs through the entire weight-*delivery* path (TransferQueue, the HCCL
+checkpoint-engine plugin actor→rollout, bucketing). The one remaining gap is the weight-*loading* path
+(`update_weights_from_ipc` reading HPU shared-memory buckets inside the vLLM engine) — a vllm_gaudi contribution,
+not a config/one-file port.
