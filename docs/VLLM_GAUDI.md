@@ -138,3 +138,22 @@ not just Ascend NPU). Concrete sub-steps: (1) relax the HCCL-engine import guard
 `torch.npu.*` device calls through `get_torch_device()`/`get_device_name()`; (3) provide a Habana stateless HCCL
 communicator for `stateless_init_process_group` (wrap habana hccl like `vllm_ascend`'s PyHccl, or use
 `torch.distributed` + `hccl` over a TCPStore).
+
+
+### Step 3 — weight-sync plugin WORKS through bucketing; stall in the cross-process transfer
+The `custom_backend_module` plugin (`patches/plugin/checkpoint_engine/hccl_hpu.py`) cleared every checkpoint-engine
+error in sequence, each fixed:
+1. `hccl not registered` → plugin registers the device-ported HCCL engine as `hccl` (verified in-container).
+2. `StatelessProcessGroup.__init__() got 'socket'` → use `StatelessProcessGroup.create(host,port,rank,world_size)`.
+3. `Weight embed_tokens ... too large to fit in the bucket` (fp32 ~520 MiB) → `update_weights_bucket_megabytes=768`.
+
+The run now reaches the **actual weight transfer**: actor gathers weights (`NO_SHARD full_state_dict`), the vLLM
+rollout server loads its base checkpoint on the 2nd HPU — then **stalls in the weight-sync region** (neither side
+logs `init_process_group rank`), hitting the 70-min limit. The suspected cause is the rendezvous/collective barrier
+(`all_gather_obj`) where actor rank 0 and the vLLM rollout rank 1 must both join — if the v1 orchestration doesn't
+trigger the rollout's `receive_weights` in lockstep with the actor's `send_weights`, one side blocks. A py-spy
+diagnostic of both processes at the stall is running to pinpoint it (same tool that nailed the tq hang).
+
+NET: the disaggregated path is now working end-to-end up to and INCLUDING the weight-transfer machinery
+(registration + communicator + bucketing all functional). The last item is the transfer rendezvous/orchestration —
+a specific, diagnosable stall, not a missing component.
