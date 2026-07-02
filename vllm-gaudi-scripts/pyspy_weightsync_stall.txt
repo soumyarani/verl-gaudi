@@ -1,0 +1,80 @@
+3800065     331 Sl   python3.10      python3.10 -m verl.trainer.main_ppo algorithm.adv_estimator=grpo data.train_files=/scratch/ssamine4/verl_gaudi/data/gsm8k/train.parquet data.val_files=/scratch/ssamine4/verl_gaudi/data/gsm8k/test.parquet data.train_batch_size=16 data.max_prompt_length=256 data.max_response_length=128 actor_rollout_ref.model.path=/scratch/ssamine4/verl_gaudi/models/Qwen2.5-0.5B-Instruct actor_rollout_ref.model.use_remove_padding=False actor_rollout_ref.actor.optim.lr=1e-6 actor_rollout_ref.actor.ppo_mini_batch_size=16 actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 actor_rollout_ref.actor.fsdp_config.param_offload=False actor_rollout_ref.actor.strategy=fsdp actor_rollout_ref.ref.strategy=fsdp actor_rollout_ref.rollout.name=vllm actor_rollout_ref.rollout.mode=async actor_rollout_ref.rollout.tensor_model_parallel_size=1 actor_rollout_ref.rollout.nnodes=1 actor_rollout_ref.rollout.n_gpus_per_node=1 actor_rollout_ref.rollout.gpu_memory_utilization=0.4 actor_rollout_ref.rollout.dtype=bfloat16 actor_rollout_ref.rollout.enforce_eager=True actor_rollout_ref.rollout.checkpoint_engine.backend=hccl actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module=verl.plugin.checkpoint_engine.hccl_hpu actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=768 actor_rollout_ref.rollout.n=4 actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 algorithm.use_kl_in_reward=False ray_kwargs.ray_init.num_cpus=64 +ray_kwargs.ray_init.num_gpus=0 +ray_kwargs.ray_init.resources={HPU:8} +ray_kwargs.ray_init._node_ip_address=127.0.0.1 +ray_kwargs.ray_init._temp_dir=/tmp/verl_ray_58207953 trainer.logger=[console] trainer.val_before_train=False trainer.n_gpus_per_node=1 trainer.nnodes=1 trainer.device=hpu trainer.use_v1=True trainer.v1.trainer_mode=separate_async trainer.save_freq=-1 trainer.test_freq=-1 trainer.total_epochs=1 trainer.total_training_steps=3 trainer.project_name=verl_gaudi trainer.experiment_name=qwen05b_gsm8k_grpo_hpu_disagg
+----- pid 3800065 : python3.10 -m verl.trainer.main_ppo algorithm.adv_estimator=grpo data. -----
+Process 3800065: python3.10 -m verl.trainer.main_ppo algorithm.adv_estimator=grpo data.train_files=/scratch/ssamine4/verl_gaudi/data/gsm8k/train.parquet data.val_files=/scratch/ssamine4/verl_gaudi/data/gsm8k/test.parquet data.train_batch_size=16 data.max_prompt_length=256 data.max_response_length=128 actor_rollout_ref.model.path=/scratch/ssamine4/verl_gaudi/models/Qwen2.5-0.5B-Instruct actor_rollout_ref.model.use_remove_padding=False actor_rollout_ref.actor.optim.lr=1e-6 actor_rollout_ref.actor.ppo_mini_batch_size=16 actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 actor_rollout_ref.actor.fsdp_config.param_offload=False actor_rollout_ref.actor.strategy=fsdp actor_rollout_ref.ref.strategy=fsdp actor_rollout_ref.rollout.name=vllm actor_rollout_ref.rollout.mode=async actor_rollout_ref.rollout.tensor_model_parallel_size=1 actor_rollout_ref.rollout.nnodes=1 actor_rollout_ref.rollout.n_gpus_per_node=1 actor_rollout_ref.rollout.gpu_memory_utilization=0.4 actor_rollout_ref.rollout.dtype=bfloat16 actor_rollout_ref.rollout.enforce_eager=True actor_rollout_ref.rollout.checkpoint_engine.backend=hccl actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module=verl.plugin.checkpoint_engine.hccl_hpu actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=768 actor_rollout_ref.rollout.n=4 actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 algorithm.use_kl_in_reward=False ray_kwargs.ray_init.num_cpus=64 +ray_kwargs.ray_init.num_gpus=0 +ray_kwargs.ray_init.resources={HPU:8} +ray_kwargs.ray_init._node_ip_address=127.0.0.1 +ray_kwargs.ray_init._temp_dir=/tmp/verl_ray_58207953 trainer.logger=[console] trainer.val_before_train=False trainer.n_gpus_per_node=1 trainer.nnodes=1 trainer.device=hpu trainer.use_v1=True trainer.v1.trainer_mode=separate_async trainer.save_freq=-1 trainer.test_freq=-1 trainer.total_epochs=1 trainer.total_training_steps=3 trainer.project_name=verl_gaudi trainer.experiment_name=qwen05b_gsm8k_grpo_hpu_disagg
+Thread 3800065 (idle): "MainThread"
+    get_objects (ray/_private/worker.py:911)
+    get (ray/_private/worker.py:2849)
+    wrapper (ray/_private/client_mode_hook.py:104)
+    auto_init_wrapper (ray/_private/auto_init_hook.py:22)
+    run_ppo (verl/trainer/main_ppo.py:89)
+    main (verl/trainer/main_ppo.py:171)
+    run_job (hydra/core/utils.py:186)
+    run (hydra/_internal/hydra.py:119)
+    <lambda> (hydra/_internal/utils.py:458)
+    run_and_report (hydra/_internal/utils.py:220)
+    _run_app (hydra/_internal/utils.py:457)
+    _run_hydra (hydra/_internal/utils.py:394)
+    decorated_main (hydra/main.py:94)
+    <module> (verl/trainer/main_ppo.py:183)
+    _run_code (runpy.py:86)
+    _run_module_as_main (runpy.py:196)
+Thread 3804948 (idle): "ray_listen_error_messages"
+    listen_error_messages (ray/_private/worker.py:2304)
+    run (threading.py:953)
+    _bootstrap_inner (threading.py:1016)
+    _bootstrap (threading.py:973)
+Thread 3804949 (idle): "ray_print_logs"
+    print_logs (ray/_private/worker.py:975)
+    run (threading.py:953)
+    _bootstrap_inner (threading.py:1016)
+    _bootstrap (threading.py:973)
+----- pid 3801134 : ray::IDLE -----
+Thread 3801134 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801135 : ray::IDLE -----
+Thread 3801135 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801136 : ray::IDLE -----
+Thread 3801136 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801137 : ray::IDLE -----
+Thread 3801137 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801138 : ray::IDLE -----
+Thread 3801138 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801139 : ray::IDLE -----
+Thread 3801139 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801140 : ray::IDLE -----
+Thread 3801140 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801141 : ray::IDLE -----
+Thread 3801141 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801142 : ray::IDLE -----
+Thread 3801142 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801143 : ray::IDLE -----
+Thread 3801143 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801144 : ray::IDLE -----
+Thread 3801144 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801145 : ray::IDLE -----
+Thread 3801145 (idle): "MainThread"
+    main_loop (ray/_private/worker.py:953)
+    <module> (ray/_private/workers/default_worker.py:330)
+----- pid 3801146 : ray::IDLE -----
+Thread 3801146 (idle): "MainThread"

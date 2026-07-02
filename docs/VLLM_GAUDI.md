@@ -157,3 +157,34 @@ diagnostic of both processes at the stall is running to pinpoint it (same tool t
 NET: the disaggregated path is now working end-to-end up to and INCLUDING the weight-transfer machinery
 (registration + communicator + bucketing all functional). The last item is the transfer rendezvous/orchestration —
 a specific, diagnosable stall, not a missing component.
+
+
+### Step 3 — py-spy ROOT CAUSE of the transfer stall: it's a 4-layer stack; layer 4 is vLLM-Gaudi internals
+A py-spy dump of every process at the stall (saved: `vllm-gaudi-scripts/pyspy_weightsync_stall.txt`) gives the
+definitive picture. Disaggregated vLLM weight-sync on Gaudi is a **4-layer stack**:
+
+1. **TransferQueue storage placement group** — FIXED (`ray_init.num_cpus=64`).
+2. **checkpoint engine, actor→rollout process** (verl's HCCL engine) — FIXED by our plugin
+   (`patches/plugin/checkpoint_engine/hccl_hpu.py`): registration, StatelessProcessGroup.create(), 768 MiB bucket.
+   **This layer WORKS** — the rollout side received a weight bucket (its `BucketedWeightSender.async_send_weights`
+   reached `self.socket.recv()` at `bucketed_weight_transfer.py:132`, which only happens after a bucket arrives).
+3. **bucketing / metadata over ZMQ** — works.
+4. **rollout process → vLLM engine, via `update_weights_from_ipc` + shared memory** — **THE BLOCKER.** On Gaudi
+   `use_shm = not is_support_ipc()` is True (the intended non-CUDA path), so the sender writes buckets to shared
+   memory, sends `bucket_meta` over ZMQ, and blocks on `socket.recv()` waiting for the vLLM engine worker to consume
+   the bucket and ACK. But the py-spy shows the vLLM **`EngineCore` sitting idle in its normal
+   `_process_input_queue` zmq poll** (`vllm/v1/engine/core.py:1194`) — it never executes `update_weights_from_ipc`,
+   so it never reads the shm bucket or ACKs → the sender hangs forever.
+
+**What this means:** the actor→rollout weight *delivery* on Gaudi is solved (our plugin). The remaining gap is the
+rollout→engine *load* path — `update_weights_from_ipc` is not wired/executed on the vLLM-Gaudi **v1 async engine**.
+That is **vllm_gaudi / vLLM-v1-engine internals**, a substantial separate component (the async server's handling of
+the weight-update RPC + shared-memory read on HPU), not a verl-side config or a one-file port.
+
+**Where this leaves the branch (honest):** disaggregated vLLM rollout on Gaudi is working through **3 of its 4
+layers** — a genuinely novel result (it had never run at all before). The 4th layer needs work inside vllm_gaudi's
+weight-update path. Candidate next directions: (a) check whether the vLLM-Gaudi **async** engine supports the
+`update_weights_from_ipc` collective RPC at all (it may only support sync/colocated weight updates) and, if not, try
+`trainer_mode=colocate_async` instead of `separate_async`; (b) file/adapt against vllm_gaudi for HPU shared-memory
+weight loading; (c) implement the shm read in a vllm_gaudi worker method. This is upstream-contribution territory,
+not a quick fix.
