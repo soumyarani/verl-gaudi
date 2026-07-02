@@ -1,5 +1,13 @@
 # vllm-gaudi branch — enabling the vLLM rollout on Gaudi
 
+> **CHECKPOINT (2026-07-02).** Standalone vLLM generates on Gaudi (Step 1 ✅). verl's **disaggregated** vLLM
+> rollout now runs through its entire weight-**delivery** path on Gaudi — 3 of 4 layers — via fixes on this
+> branch: `ray_init.num_cpus=64` (TransferQueue PG hang), the **HCCL checkpoint-engine plugin**
+> (`patches/plugin/checkpoint_engine/hccl_hpu.py`, actor→rollout weight delivery), and bucketing. The **one**
+> remaining gap is the weight-**loading** path (`update_weights_from_ipc` reading HPU shared-memory buckets
+> **inside the vLLM engine**) — confirmed via py-spy on both async modes; it's a **vllm_gaudi upstream
+> contribution**, not a verl config/one-file port. Full 4-layer analysis + diagnostics below.
+
 > **Why this branch exists.** The [benchmark](BENCHMARK.md) proved the point: verl's **HF rollout** is not viable
 > for real settings on Gaudi (one full-settings step's generation ran **>38 min and never finished**, because HF
 > `model.generate` is serial with no paged/batched KV cache). A100 does the same step in ~110 s *only because it
