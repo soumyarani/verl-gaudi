@@ -16,17 +16,13 @@
 # upstream HCCL engine source with surgical device swaps and registers it under
 # the name "hccl".
 import os
-import socket
-from datetime import timedelta
 
 import torch
-from torch.distributed import TCPStore
 from vllm.distributed.utils import StatelessProcessGroup
 
 import verl.checkpoint_engine as _ce_pkg
 from verl.checkpoint_engine.base import CheckpointEngineRegistry  # noqa: F401  (used by exec'd source)
 from verl.utils.device import get_device_name, get_torch_device
-from verl.utils.net_utils import is_ipv6
 
 
 class HpuStatelessCommunicator:
@@ -67,38 +63,15 @@ class HpuStatelessCommunicator:
 def _hpu_stateless_init_process_group(master_address, master_port, rank, world_size, device):
     """Build a StatelessProcessGroup (TCPStore rendezvous) + HpuStatelessCommunicator.
 
-    Mirrors verl.utils.distributed.stateless_init_process_group / create_process_group
-    but returns the CPU-mediated Habana communicator instead of PyNccl.
+    Uses vLLM's StatelessProcessGroup.create() (handles the TCPStore/listen-socket
+    internally, matching this container's vLLM signature) and returns the
+    CPU-mediated Habana communicator instead of PyNccl.
     """
-    launch_server = rank == 0
-    if launch_server:
-        if is_ipv6(master_address):
-            listen_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-        else:
-            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen_socket.bind((master_address, master_port))
-        listen_socket.listen()
-        listen_fd = listen_socket.fileno()
-    else:
-        listen_socket = None
-        listen_fd = None
-
-    store = TCPStore(
-        host_name=master_address,
+    pg = StatelessProcessGroup.create(
+        host=master_address,
         port=master_port,
-        world_size=world_size,
-        is_master=launch_server,
-        timeout=timedelta(seconds=300),
-        use_libuv=False,
-        master_listen_fd=listen_fd,
-    )
-    pg = StatelessProcessGroup(
         rank=rank,
         world_size=world_size,
-        store=store,
-        socket=listen_socket,
-        data_expiration_seconds=3600,
     )
     return HpuStatelessCommunicator(pg, device)
 
