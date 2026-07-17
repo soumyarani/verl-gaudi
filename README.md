@@ -48,6 +48,12 @@ they live on Sol at `/scratch/ssamine4/verl_gaudi/`. This repo carries everythin
 
 > ✅ **DONE (2026-06-30):** verl GRPO ran **3/3 steps on one Gaudi HPU**, `VERL_RC=0`, all metrics logged.
 > Success criterion #3 met. Proof: `logs/SUCCESS_grpo_3steps_57954952.log` (excerpt in `results/`).
+>
+> ✅ **DONE (2026-07-17) — disaggregated too:** the **vLLM-rollout + disaggregated weight-sync** path
+> (`separate_async`) now also runs a full GRPO iteration on Gaudi 2, **3/3 steps, `VERL_RC=0`**, on ASU's **AIR**
+> Kubernetes cluster (verl 0.9 + `vllm_gaudi 0.24`, 4 HPUs). This exercises the vLLM half the single-card colocated
+> run never touched. Full pipeline + fix chain: **[`docs/AIR_GAUDI_DISAGG.md`](docs/AIR_GAUDI_DISAGG.md)**;
+> patches in [`patches/air/`](patches/air/).
 
 | Stage | State |
 |-------|-------|
