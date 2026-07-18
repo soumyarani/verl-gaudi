@@ -238,7 +238,42 @@ guard) are documented in [`AIR_RUNBOOK.md`] / the `hccl_hpu` plugin on the `vllm
 
 ---
 
-## 6. Follow-ups (not blocking "it runs")
+## 6. Going from "it runs" to "it trains" — GSM8k GRPO run
+
+The smoke run above proves the *machinery*, but its reward was `0.0`. Getting a real **learning signal** needed one
+fix; getting a **sustained multi-step** run hits genuine HPU-runtime walls.
+
+### 6.1 Reward = 0 was a format mismatch (fixed)
+Qwen2.5-0.5B-Instruct **solves** GSM8k but answers in its native `\boxed{72}` format, while verl's `gsm8k` reward
+defaults to `method="strict"` (requires the literal `#### 72`). So every sample scored 0 → advantage 0 → `pg_loss`
+exactly `0.0` (no learning) — even though the model was correct. **It is not truncation** (raising
+`max_response_length` 128→256 did not help). Fix: [`patches/air/patch_air_gsm8k_flexible.py`](../patches/air/patch_air_gsm8k_flexible.py)
+defaults the scorer to `flexible` (last-number extraction): `\boxed{72}`→1.0, wrong→0.0.
+
+**Result — a real GRPO step on Gaudi** (`scripts/run_grpo_resilient_v05.sh`, response 256, flexible reward):
+```
+step:1  critic/rewards/mean:0.1406  critic/rewards/max:1.0  actor/pg_loss:0.00747  actor/grad_norm:1.008
+        response_length/mean:242.7  (pg_loss was exactly 0.0 before the reward fix)
+```
+Non-zero reward *and* non-zero policy-gradient loss = genuine learning signal. Logged to wandb (offline).
+
+### 6.2 Why a *full epoch* isn't practical on this stack (yet)
+Three HPU-runtime issues, diagnosed but not fixed (they are vllm_gaudi/habana-internal):
+1. **`update_actor` ≈ 900-1000s/step** (response 256) — HPU graph recompilation on dynamic shapes (constant
+   "was not warmed-up"). A full GSM8k epoch (~467 steps) ≈ 5 days.
+2. **Intermittent actor segfault in the backward** — `habana_lazy::HbLazyTensorImpl::handle_view_cycles` ←
+   `VariableHooks::set_data` (a `param.data=` swap) in a backward pre-hook, ~every 1-3 steps. Not memory (90GB HPU /
+   280GB host free), not gradient checkpointing (removing it didn't help), not deterministic (one run did 2 steps
+   then died on step 3).
+3. **Checkpoint LOAD (resume) fails with `synStatus 26` "Graph compile failed"** (`fsdp_checkpoint_manager.load_checkpoint`)
+   — the project's original graph-compile blocker, on the resume path. So **save works but resume crashes**, which
+   defeats a retry-on-crash wrapper (`run_grpo_resilient_v05.sh` banks step 1, then every resume crashes on load).
+
+**Bottom line:** the pipeline and the reward are correct and a real training step runs; a *sustained* run needs the
+HPU lazy-mode backward segfault (#2) and the synStatus-26-on-checkpoint-load (#3) fixed — or, untried, eager mode
+(`PT_HPU_LAZY_MODE=0`) to sidestep the lazy-view bugs.
+
+## 7. Follow-ups (not blocking "it runs")
 
 - **Reward is currently all-0** on this smoke config: `data.max_response_length=128` truncates ~95% of GSM8k answers
   (`response_length/clip_ratio≈0.95`) before the `#### <answer>` the reward checks → 0 reward → 0 advantage → `pg_loss=0`.

@@ -12,6 +12,7 @@ layout: `/workspace/vllm/…`, `/workspace/vllm-gaudi/…`, `/workspace/verl-src
 | `patch_air_weightsync_dict.py` | C | (same two files) | upgrade the capture/restore to **full `__dict__` + `__class__`** — the load-bearing fix for the "deadlock" |
 | `patch_air_detok_neuter.py` | D1 | `vllm/tokenizers/detokenizer_utils.py` | skip cosmetic logprob detokenization (HPU emits out-of-range logprob token-ids) |
 | `patch_air_logprob_tolerant.py` | D2 | `vllm_rollout/vllm_async_server.py` | default `0.0` when the sampled token is absent from the HPU logprobs dict |
+| `patch_air_gsm8k_flexible.py` | reward | `verl/utils/reward_score/gsm8k.py` | GSM8k scorer -> flexible extraction (model answers in `\boxed{}`, strict `####` gave reward 0) |
 
 Apply in order (C base → C dict → D1 → D2):
 ```bash
