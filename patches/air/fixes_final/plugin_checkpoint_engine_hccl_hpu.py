@@ -84,21 +84,13 @@ def _hpu_stateless_init_process_group(master_address, master_port, rank, world_s
         listen_socket = None
         listen_fd = None
 
-    store = TCPStore(
-        host_name=master_address,
+    pg = StatelessProcessGroup.create(
+        host=master_address,
         port=master_port,
-        world_size=world_size,
-        is_master=launch_server,
-        timeout=timedelta(seconds=300),
-        use_libuv=False,
-        master_listen_fd=listen_fd,
-    )
-    pg = StatelessProcessGroup(
         rank=rank,
         world_size=world_size,
-        store=store,
-        socket=listen_socket,
         data_expiration_seconds=3600,
+        listen_socket=listen_socket,
     )
     return HpuStatelessCommunicator(pg, device)
 
