@@ -15,6 +15,8 @@ VERL_RC=0
 - **Config:** `trainer.use_v1=True trainer.v1.trainer_mode=separate_async` — the **disaggregated** path where the
   actor (FSDP trainer) and the vLLM rollout run in **separate processes on separate HPUs**, and trained weights are
   streamed actor→rollout each step through a checkpoint engine.
+- **Sustained/full run:** solved via **eager mode** (`PT_HPU_LAZY_MODE=0`) — see §6.3. Fixes the segfault, the
+  resume crash, and the ~1000s/step slowness in one change; ~40-60s/step, reward trends up.
 - **Where:** ASU **AIR Platform** — a dedicated Gaudi-2 **Kubernetes** cluster (Rancher), namespace `user-ssamine4`,
   quota **max 4 HPUs**.
 
@@ -269,9 +271,24 @@ Three HPU-runtime issues, diagnosed but not fixed (they are vllm_gaudi/habana-in
    — the project's original graph-compile blocker, on the resume path. So **save works but resume crashes**, which
    defeats a retry-on-crash wrapper (`run_grpo_resilient_v05.sh` banks step 1, then every resume crashes on load).
 
-**Bottom line:** the pipeline and the reward are correct and a real training step runs; a *sustained* run needs the
-HPU lazy-mode backward segfault (#2) and the synStatus-26-on-checkpoint-load (#3) fixed — or, untried, eager mode
-(`PT_HPU_LAZY_MODE=0`) to sidestep the lazy-view bugs.
+### 6.3 ✅ SOLVED — run the actor in EAGER mode (`PT_HPU_LAZY_MODE=0`)
+All three issues in 6.2 are **lazy-tensor / graph-compilation artifacts**, so eager mode eliminates them at the root.
+**One env change fixes everything:**
+```bash
+export PT_HPU_LAZY_MODE=0 PT_HPU_ENABLE_LAZY_COLLECTIVES=0
+```
+Verified end-to-end (`scripts/run_grpo_eager_v06.sh`):
+- **vLLM rollout still works in eager** (0 `EngineGenerateError`) — tolerated because we already pass
+  `enforce_eager=True` (no HPU-graph wrapping). The feared "vLLM needs lazy" did not happen.
+- **Backward segfault gone** (0 `handle_view_cycles`) — 3 steps clean, `VERL_RC=0`.
+- **Checkpoint resume works** (0 `synStatus 26`) — resumed from `global_step_3`, continued steps 4-6, `VERL_RC=0`.
+- **~15× faster** — ~40-60s/step vs lazy's ~1000s (no recompilation). A full epoch is now hours, not days.
+- Real trending reward: steps 1-6 = 0.23, 0.17, 0.28, 0.59, 0.19, 0.06.
+
+**Recipe for a working full GRPO run on Gaudi: use eager mode for the actor+vLLM disaggregated path**, plus the
+Layer A-E patches (§4) and the flexible reward (§6.1). Full run: `scripts/run_grpo_eager_full_v08.sh` (eager, 200
+steps, `save_freq=20` + `resume_mode=auto`, retry wrapper). Harmless in eager: `mark_step` no-op warnings; a post-run
+`DataLoader worker killed` line after `VERL_RC=0`.
 
 ## 7. Follow-ups (not blocking "it runs")
 
