@@ -15,6 +15,8 @@ VERL_RC=0
 - **Config:** `trainer.use_v1=True trainer.v1.trainer_mode=separate_async` — the **disaggregated** path where the
   actor (FSDP trainer) and the vLLM rollout run in **separate processes on separate HPUs**, and trained weights are
   streamed actor→rollout each step through a checkpoint engine.
+- **FULL EPOCH:** ✅ 467/467 steps, `VERL_RC=0`, reward 0.31→0.62, peak RSS 15 GB — see §6.5. Needs eager mode +
+  `micro_batch=2` + the weight-sync TTL fix.
 - **Sustained/full run:** solved via **eager mode** (`PT_HPU_LAZY_MODE=0`) — see §6.3. Fixes the segfault, the
   resume crash, and the ~1000s/step slowness in one change; ~40-60s/step, reward trends up.
 - **Where:** ASU **AIR Platform** — a dedicated Gaudi-2 **Kubernetes** cluster (Rancher), namespace `user-ssamine4`,
@@ -304,6 +306,23 @@ It therefore OOMs around step 55-58. To run a full epoch: raise the pod's memory
 `/workspace` rebuild, since it's emptyDir), or free the weight-sync shm + bound the off-policy buffer. For a clean
 demonstrator, `total_training_steps ≤ 45` completes reliably. (emptyDir survives a *container* restart but not a pod
 reschedule.)
+
+
+### 6.5 ✅✅ FULL EPOCH COMPLETED — 467 steps, model learned
+With the memory-leak fix (below), a **full GSM8k epoch ran to completion**: **467/467 steps, `VERL_RC=0`, zero
+failures**, ~3.5 h, peak actor RSS **15 GB** (bounded), and the model **learned** — mean reward **0.31 → 0.62**
+(GSM8k accuracy ~doubled), response length shrinking 240→166 tokens as answers got more efficient. Recipe:
+`scripts/run_grpo_eager_final.sh` (eager + `micro_batch=2` + the leak fix + `save_freq=-1`, `total_epochs=1`).
+
+**The leak that had blocked it (`hccl_hpu.py`):** the HPU HCCL weight-sync broadcasts each 768 MB bucket **every step**
+via vLLM `StatelessProcessGroup.broadcast_obj`, which `store.set(pickle.dumps(cpu_bucket))` into a TCPStore whose
+daemon runs **inside the actor process**, expiring entries only after `data_expiration_seconds`. That was **3600 s
+(1 h)** → buckets piled up in actor RSS ~0.9 GB/step → OOM at ~step 58 (hard **96 GB cgroup** limit; `free` shows the
+node's 502 GB, misleadingly). `broadcast_obj`'s own docstring warns it's for *"limited times, e.g., initialization"* —
+the per-step weight-sync misuses it. **Fix: `data_expiration_seconds` 3600 → 60**, so each step's `expire_data()`
+clears prior buckets (receivers fetch synchronously → short TTL is safe). RSS went from climbing (12.9→25.4 GB by
+step 16) to **flat ~13 GB across all 467 steps**. On **GPU this never happens** — GPU uses the CUDA-IPC path (device
+handles + `ipc_collect`), not the host-shm `broadcast_obj` fallback HPU is forced onto (no CUDA IPC on Gaudi).
 
 ## 7. Follow-ups (not blocking "it runs")
 
