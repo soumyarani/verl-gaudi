@@ -290,6 +290,21 @@ Layer A-E patches (§4) and the flexible reward (§6.1). Full run: `scripts/run_
 steps, `save_freq=20` + `resume_mode=auto`, retry wrapper). Harmless in eager: `mark_step` no-op warnings; a post-run
 `DataLoader worker killed` line after `VERL_RC=0`.
 
+
+### 6.4 ✅ A complete GRPO run + the one remaining scale limit
+`scripts/run_grpo_eager_final.sh` (eager + `micro_batch=2`) completed a clean **40-step** GRPO run: `VERL_RC=0`,
+zero failures, reward improving (first-quarter 0.205 → last-quarter 0.264), wandb-logged. `micro_batch=2` was needed
+to fix an HPU **device**-memory fragmentation (`synStatus 26 Memory section create failed`) that otherwise hit ~step 48.
+
+The only thing blocking a *full 467-step epoch* is an **infra memory cap, not the pipeline**: the container has a hard
+**96 GB cgroup limit** (`/sys/fs/cgroup/memory.max`; `free` misleadingly shows the node's 502 GB), and the
+`separate_async` run's **host memory grows ~0.5-0.7 GB/step** (the actor worker ~53 GB and climbing — likely the HPU
+weight-sync shm buckets not being freed since `ipc_collect` is a no-op on HPU, plus the off-policy trajectory buffer).
+It therefore OOMs around step 55-58. To run a full epoch: raise the pod's memory limit (deploy edit → pod restart →
+`/workspace` rebuild, since it's emptyDir), or free the weight-sync shm + bound the off-policy buffer. For a clean
+demonstrator, `total_training_steps ≤ 45` completes reliably. (emptyDir survives a *container* restart but not a pod
+reschedule.)
+
 ## 7. Follow-ups (not blocking "it runs")
 
 - **Reward is currently all-0** on this smoke config: `data.max_response_length=128` truncates ~95% of GSM8k answers
