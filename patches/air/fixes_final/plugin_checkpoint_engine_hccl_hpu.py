@@ -89,7 +89,7 @@ def _hpu_stateless_init_process_group(master_address, master_port, rank, world_s
         port=master_port,
         rank=rank,
         world_size=world_size,
-        data_expiration_seconds=3600,
+        data_expiration_seconds=60,
         listen_socket=listen_socket,
     )
     return HpuStatelessCommunicator(pg, device)
