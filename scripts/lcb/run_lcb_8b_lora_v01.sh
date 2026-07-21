@@ -13,10 +13,10 @@ python -m verl.trainer.main_ppo \
   data.filter_overlong_prompts=True data.truncation=right \
   actor_rollout_ref.model.path=Qwen/Qwen3-8B actor_rollout_ref.model.use_remove_padding=False \
   actor_rollout_ref.model.lora_rank=32 actor_rollout_ref.model.lora_alpha=64 \
-  actor_rollout_ref.model.target_modules=all-linear \
+  actor_rollout_ref.model.target_modules=all-linear actor_rollout_ref.model.lora.merge=True \
   actor_rollout_ref.actor.optim.lr=1e-6 actor_rollout_ref.actor.ppo_mini_batch_size=8 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 actor_rollout_ref.actor.use_kl_loss=False \
-  actor_rollout_ref.actor.fsdp_config.param_offload=False actor_rollout_ref.actor.strategy=fsdp \
+  actor_rollout_ref.actor.fsdp_config.param_offload=False actor_rollout_ref.actor.strategy=fsdp actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
   actor_rollout_ref.rollout.name=vllm actor_rollout_ref.rollout.mode=async \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 actor_rollout_ref.rollout.nnodes=1 \
   actor_rollout_ref.rollout.n_gpus_per_node=1 actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
@@ -24,7 +24,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.load_format=safetensors \
   actor_rollout_ref.rollout.checkpoint_engine.backend=hccl \
   actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module=verl.plugin.checkpoint_engine.hccl_hpu \
-  actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=512 \
+  actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1536 \
   actor_rollout_ref.rollout.n=5 actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.rollout.max_model_len=2560 \
   custom_reward_function.path=/workspace/lcb_reward.py custom_reward_function.name=compute_score \
