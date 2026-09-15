@@ -23,6 +23,15 @@ vg_gaudi_run() {
   local RAYTMP="/tmp/verl_ray_$JOB";        mkdir -p "$RAYTMP"
   local WKEY=""; [ -f "$VG_HOME/.wandb_key" ] && WKEY="$(cat "$VG_HOME/.wandb_key")"
 
+  # Forward experiment knobs ONLY when the caller set them, so each inside script keeps
+  # its own default (full=3 steps, lora=5). Injecting defaults here would shadow those.
+  local -a XENV=()
+  [ -n "${MODEL:-}" ]      && XENV+=(--env "MODEL=$MODEL")
+  [ -n "${STEPS:-}" ]      && XENV+=(--env "STEPS=$STEPS")
+  [ -n "${EXP:-}" ]        && XENV+=(--env "EXP=$EXP")
+  [ -n "${LORA_RANK:-}" ]  && XENV+=(--env "LORA_RANK=$LORA_RANK")
+  [ -n "${LORA_ALPHA:-}" ] && XENV+=(--env "LORA_ALPHA=$LORA_ALPHA")
+
   echo "NODE=$(hostname) VG_HOME=$VG_HOME VG_WORK=$VG_WORK SIF=$SIF $(date)"
   echo "SLURM HPU env: MODULES=[${HABANA_VISIBLE_MODULES:-unset}] DEVICES=[${HABANA_VISIBLE_DEVICES:-unset}]"
 
@@ -42,9 +51,7 @@ vg_gaudi_run() {
     --env RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0 \
     ${WKEY:+--env WANDB_API_KEY="$WKEY"} --env WANDB_DIR="$VG_WORK" --env WANDB__SERVICE_WAIT=300 \
     --env VG_HOME="$VG_HOME" --env VG_WORK="$VG_WORK" \
-    --env MODEL="${MODEL:-$VG_HOME/models/Qwen2.5-0.5B-Instruct}" \
-    --env STEPS="${STEPS:-3}" --env EXP="${EXP:-}" \
-    --env LORA_RANK="${LORA_RANK:-32}" --env LORA_ALPHA="${LORA_ALPHA:-32}" \
+    "${XENV[@]}" \
     --env PATH="$VG_HOME/runtime/cpkgs/bin:/usr/local/bin:/usr/bin:/bin" \
     "$SIF" bash "$INSIDE"
   local rc=$?
