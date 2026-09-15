@@ -18,5 +18,6 @@ sol/
     _inside_full_grpo.sh  _inside_lora_grpo.sh  setup_venv.sh
 ```
 
-Verified: all four entrypoints reach `VERL_RC=0` on Sol (Qwen2.5-0.5B GSM8k GRPO).
+Verified: `sol/gaudi/lora_grpo.sbatch` re-run from `~/verl_gaudi` → `VERL_RC=0`. The other
+three are adapted from proven runs (Gaudi `run_05`, A100 benchmark) — see AGENTS.md for exact status.
 See the repo root `docs/` for the full Gaudi port, debugging journey, and A100-vs-Gaudi benchmark.

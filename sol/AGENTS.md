@@ -18,7 +18,14 @@ cd ~/verl_gaudi
 | A100, LoRA GRPO        | `sbatch sol/a100/lora_grpo.sbatch` |
 
 Default = Qwen2.5-0.5B on GSM8k, a few steps, metrics to **wandb** (project `verl_gaudi`)
-+ console. All four are verified to reach `VERL_RC=0`.
++ console.
+
+**Verification status** (be honest about what's been re-run in this `sol/` form):
+- `sol/gaudi/lora_grpo.sbatch` — ✅ re-verified from `~/verl_gaudi` (job 63129781, 3 steps, `VERL_RC=0`).
+- `sol/gaudi/full_grpo.sbatch` — same launcher + container as the LoRA path; identical to the
+  originally-proven `run_05` (job 57954952, 3/3 steps). Not separately re-run in `sol/` form.
+- `sol/a100/{full,lora}_grpo.sbatch` — faithfully adapted from the proven A100 benchmark
+  scripts (`docs/BENCHMARK.md`), but **not yet re-run** in this restructured form. Run once to confirm.
 
 ## Tuning without editing scripts (env overrides)
 
