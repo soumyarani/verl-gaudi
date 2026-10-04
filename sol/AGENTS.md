@@ -24,10 +24,17 @@ Default = Qwen2.5-0.5B on GSM8k, a few steps, metrics to **wandb** (project `ver
 - `sol/gaudi/lora_grpo.sbatch` — ✅ re-verified from `~/verl_gaudi` (job 63129781, 3 steps, `VERL_RC=0`).
 - `sol/gaudi/full_grpo.sbatch` — same launcher + container as the LoRA path; identical to the
   originally-proven `run_05` (job 57954952, 3/3 steps). Not separately re-run in `sol/` form.
-- `sol/a100/{full,lora}_grpo.sbatch` — first run (job 63330649) failed `ModuleNotFoundError:
-  flash_attn` because the actor's remove-padding path needs flash-attn. **Fixed** by adding
-  `actor_rollout_ref.model.use_remove_padding=False` (same as the Gaudi scripts); one confirming
-  run still pending. (Perf alternative: `uv pip install flash-attn` into the venv and drop that flag.)
+- `sol/a100/lora_grpo.sbatch` — ✅ VERIFIED (job 64607765, `VERL_RC=0`, 2/2 steps, reward>0,
+  grad_norm healthy, batched vLLM ~15–20 s/step). Getting there took four fixes, all baked into
+  `setup_venv.sh` / the scripts: `use_remove_padding=False`; guard verl's unconditional
+  `flash_attn` import; pin `transformers==4.51.3` (vLLM 0.8.5 otherwise pulls 5.x, which breaks it
+  and verl); patch verl's hard-coded `attn_implementation="flash_attention_2"` → `sdpa`.
+- `sol/a100/full_grpo.sbatch` — same venv/fixes; not separately re-run (identical init path).
+- **Perf note for long sequences:** SDPA is correct but slower than FlashAttention-2 on long
+  responses. For real long-context runs, install flash-attn (e.g. `flash-attn==2.7.4.post1`
+  for torch 2.6 / cp312 / cu12) and revert `fsdp_workers.py` to `flash_attention_2`.
+- **Fast queue tip:** request `--gres=gpu:1` (any GPU) on `-p htc` — starts in ~1 min; asking for
+  a specific type (`gpu:a100:1`) queues much longer. `gpu:a100` on Sol = 80GB.
 
 ## Tuning without editing scripts (env overrides)
 
