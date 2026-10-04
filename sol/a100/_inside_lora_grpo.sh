@@ -19,6 +19,7 @@ python -m verl.trainer.main_ppo \
   data.val_files="$VG_HOME/data/gsm8k/test.parquet" \
   data.train_batch_size="$TBS" data.max_prompt_length=512 data.max_response_length="$RESP" \
   actor_rollout_ref.model.path="$MODEL" \
+  actor_rollout_ref.model.use_remove_padding=False \
   actor_rollout_ref.model.lora_rank="$LORA_RANK" \
   actor_rollout_ref.model.lora_alpha="$LORA_ALPHA" \
   actor_rollout_ref.model.target_modules=all-linear \

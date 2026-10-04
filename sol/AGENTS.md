@@ -24,8 +24,10 @@ Default = Qwen2.5-0.5B on GSM8k, a few steps, metrics to **wandb** (project `ver
 - `sol/gaudi/lora_grpo.sbatch` — ✅ re-verified from `~/verl_gaudi` (job 63129781, 3 steps, `VERL_RC=0`).
 - `sol/gaudi/full_grpo.sbatch` — same launcher + container as the LoRA path; identical to the
   originally-proven `run_05` (job 57954952, 3/3 steps). Not separately re-run in `sol/` form.
-- `sol/a100/{full,lora}_grpo.sbatch` — faithfully adapted from the proven A100 benchmark
-  scripts (`docs/BENCHMARK.md`), but **not yet re-run** in this restructured form. Run once to confirm.
+- `sol/a100/{full,lora}_grpo.sbatch` — first run (job 63330649) failed `ModuleNotFoundError:
+  flash_attn` because the actor's remove-padding path needs flash-attn. **Fixed** by adding
+  `actor_rollout_ref.model.use_remove_padding=False` (same as the Gaudi scripts); one confirming
+  run still pending. (Perf alternative: `uv pip install flash-attn` into the venv and drop that flag.)
 
 ## Tuning without editing scripts (env overrides)
 

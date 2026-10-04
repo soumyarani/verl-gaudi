@@ -17,6 +17,7 @@ python -m verl.trainer.main_ppo \
   data.val_files="$VG_HOME/data/gsm8k/test.parquet" \
   data.train_batch_size="$TBS" data.max_prompt_length=512 data.max_response_length="$RESP" \
   actor_rollout_ref.model.path="$MODEL" \
+  actor_rollout_ref.model.use_remove_padding=False \
   actor_rollout_ref.actor.optim.lr=1e-6 \
   actor_rollout_ref.actor.ppo_mini_batch_size="$MINI" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
